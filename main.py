@@ -319,6 +319,29 @@ def calculate_user_open_value(user_id):
     return total_invested, total_value, total_possible_win, len(rows)
 
 
+
+
+def progress_bar(value, size=12):
+    """Crea una barra testuale per percentuali 0-100."""
+    try:
+        value = float(value)
+    except Exception:
+        value = 0
+
+    value = max(0, min(100, value))
+    filled = round((value / 100) * size)
+    empty = size - filled
+    return "█" * filled + "░" * empty
+
+
+def market_color(yes_p):
+    if yes_p >= 60:
+        return 0x22c55e
+    if yes_p <= 40:
+        return 0xef4444
+    return 0xf59e0b
+
+
 # =========================
 # BASE COMMANDS
 # =========================
@@ -327,11 +350,18 @@ async def ping(ctx):
     await ctx.send("pong 🟢")
 
 
-@bot.command()
+@bot.command(aliases=["saldo"])
 async def balance(ctx):
     bal = get_user(str(ctx.author.id))
-    await ctx.send(f"💰 {bal}")
 
+    embed = discord.Embed(
+        title="💰 Saldo",
+        color=0x22c55e
+    )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="Crediti disponibili", value=f"{bal}", inline=False)
+
+    await ctx.send(embed=embed)
 
 # =========================
 # API TEST COMMANDS
@@ -356,7 +386,7 @@ f"""🧪 TEST API FOOTBALL-DATA
     )
 
 
-@bot.command()
+@bot.command(aliases=["competizioni"])
 async def competitions(ctx):
     msg = "🏆 COMPETIZIONI RAPIDE\n\n"
 
@@ -418,7 +448,7 @@ async def testmatch(ctx, match_id: int):
 # =========================
 # FIND MATCHES
 # =========================
-@bot.command()
+@bot.command(aliases=["oggi"])
 async def today(ctx, competition: str = "WC"):
     competition = competition.upper()
 
@@ -477,7 +507,7 @@ Esempio:
     await send_long(ctx, msg)
 
 
-@bot.command()
+@bot.command(aliases=["partite", "calendario"])
 async def fixtures(ctx, competition: str = "SA", days: int = 7):
     competition = competition.upper()
 
@@ -544,7 +574,7 @@ Esempio:
 # =========================
 # CREATE MARKET FROM FOOTBALL-DATA MATCH
 # =========================
-@bot.command()
+@bot.command(aliases=["creamercato"])
 async def creatematch(ctx, match_id: int, *, question):
     res = get_match_result(match_id)
 
@@ -586,31 +616,25 @@ Prova prima:
     market_id = c.lastrowid
     conn.commit()
 
-    await ctx.send(
-f"""📊 Mercato creato!
-
-🆔 ID Mercato: {market_id}
-🆔 Match API: {match_id}
-
-🏟️ Partita:
-{home} vs {away}
-
-📡 Stato API: {status}
-
-❓ Domanda:
-{question}
-
-⚖️ Quote iniziali:
-🟢 YES: 50%
-🔴 NO: 50%
-"""
+    embed = discord.Embed(
+        title="📊 Mercato creato",
+        description=question,
+        color=0x22c55e
     )
+    embed.add_field(name="🆔 ID Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="🆔 Match API", value=str(match_id), inline=True)
+    embed.add_field(name="📡 Stato API", value=status, inline=True)
+    embed.add_field(name="🏟️ Partita", value=f"{home} vs {away}", inline=False)
+    embed.add_field(name="🟢 YES", value="50%", inline=True)
+    embed.add_field(name="🔴 NO", value="50%", inline=True)
+    embed.set_footer(text="Usa !buy ID YES/NO importo oppure !compra ID YES/NO importo")
 
+    await ctx.send(embed=embed)
 
 # =========================
 # MARKETS VIEW
 # =========================
-@bot.command()
+@bot.command(aliases=["mercati"])
 async def markets(ctx):
     c.execute("SELECT id, question, yes_pool, no_pool FROM markets WHERE active=1")
     rows = c.fetchall()
@@ -619,29 +643,37 @@ async def markets(ctx):
         await ctx.send("📭 Nessun mercato attivo")
         return
 
-    msg = "📊 MERCATI ATTIVI\n\n"
+    embed = discord.Embed(
+        title="📊 Mercati attivi",
+        description=f"Mercati disponibili: {len(rows)}",
+        color=0x2563eb
+    )
 
-    for mid, q, yes, no in rows:
+    for mid, q, yes, no in rows[:10]:
         total = yes + no
         yp, np = market_probabilities(yes, no)
+        embed.add_field(
+            name=f"🆔 Mercato {mid}",
+            value=(
+                f"❓ {q}\n"
+                f"🟢 YES: **{yp}%** `{progress_bar(yp, 10)}`\n"
+                f"🔴 NO: **{np}%**\n"
+                f"💰 Pool: **{total}**"
+            ),
+            inline=False
+        )
 
-        msg += f"""🆔 {mid}
-❓ {q}
+    if len(rows) > 10:
+        embed.set_footer(text="Mostro i primi 10 mercati attivi")
+    else:
+        embed.set_footer(text="Usa !market ID o !mercato ID per il dettaglio")
 
-🟢 YES: {yp}%
-🔴 NO: {np}%
-💰 Pool: {total}
-
-────────────────
-"""
-
-    await ctx.send(msg)
-
+    await ctx.send(embed=embed)
 
 # =========================
 # SINGLE MARKET VIEW
 # =========================
-@bot.command()
+@bot.command(aliases=["mercato"])
 async def market(ctx, market_id: int):
     c.execute("""
         SELECT question, yes_pool, no_pool, active, resolved, result, match_key
@@ -657,77 +689,70 @@ async def market(ctx, market_id: int):
 
     q, yes, no, active, resolved, result, match_key = row
     total = yes + no
-
     yes_p, no_p = market_probabilities(yes, no)
 
-    match_text = ""
+    match_line = "N/D"
+    api_status = "N/D"
+    score = None
 
     if match_key and match_key.startswith("MATCH_"):
         match_id = match_key.replace("MATCH_", "")
         res = get_match_result(match_id)
 
         if res:
-            match_text = f"""
-🏟️ Partita:
-{res["home"]} vs {res["away"]}
-
-📡 Stato API: {res["status"]}
-"""
+            match_line = f'{res["home"]} vs {res["away"]}'
+            api_status = res["status"]
             if res["home_goals"] is not None and res["away_goals"] is not None:
-                match_text += f"⚽ Risultato live/finale: {res['home_goals']}-{res['away_goals']}\n"
+                score = f'{res["home_goals"]}-{res["away_goals"]}'
 
     if active == 1:
-        status = "ATTIVO"
+        status = "🟢 ATTIVO"
     elif resolved == 1:
-        status = f"CHIUSO | Risultato mercato: {result}"
+        status = f"⚪ CHIUSO | Risultato mercato: {result}"
     else:
-        status = "CHIUSO"
+        status = "⚪ CHIUSO"
 
-    await ctx.send(
-f"""📊 MERCATO #{market_id}
-
-❓ {q}
-{match_text}
-🟢 YES: {yes_p}%
-🔴 NO: {no_p}%
-
-💰 Pool totale: {total}
-📉 Stato: {status}
-"""
+    embed = discord.Embed(
+        title=f"📊 Mercato #{market_id}",
+        description=q,
+        color=market_color(yes_p)
     )
+    embed.add_field(name="🏟️ Partita", value=match_line, inline=False)
+    embed.add_field(name="📡 Stato API", value=api_status, inline=True)
+    if score:
+        embed.add_field(name="⚽ Risultato", value=score, inline=True)
+    embed.add_field(name="📉 Stato mercato", value=status, inline=True)
+    embed.add_field(name="🟢 YES", value=f"**{yes_p}%**\n`{progress_bar(yes_p)}`", inline=True)
+    embed.add_field(name="🔴 NO", value=f"**{no_p}%**\n`{progress_bar(no_p)}`", inline=True)
+    embed.add_field(name="💰 Pool totale", value=str(total), inline=True)
+    embed.set_footer(text="Usa !buy, !sell, !chart oppure gli alias italiani !compra, !vendi, !grafico")
 
+    await ctx.send(embed=embed)
 
 # =========================
 # PORTFOLIO
 # =========================
-@bot.command()
+@bot.command(aliases=["portafoglio"])
 async def portfolio(ctx):
     user_id = str(ctx.author.id)
     balance = get_user(user_id)
     rows = get_open_positions(user_id)
 
     if not rows:
-        await ctx.send(
-f"""💼 PORTFOLIO DI {ctx.author.display_name}
-
-💰 Saldo: {balance}
-
-Non hai ancora aperto nessuna posizione.
-"""
+        embed = discord.Embed(
+            title=f"💼 Portafoglio di {ctx.author.display_name}",
+            description="Non hai ancora aperto nessuna posizione.",
+            color=0x64748b
         )
+        embed.set_thumbnail(url=ctx.author.display_avatar.url)
+        embed.add_field(name="💰 Saldo", value=f"{balance} crediti", inline=False)
+        await ctx.send(embed=embed)
         return
 
     total_invested = 0.0
     total_value = 0.0
     total_possible_win = 0.0
-
-    msg = f"""💼 PORTFOLIO DI {ctx.author.display_name}
-
-💰 Saldo: {balance}
-
-────────────────────
-
-"""
+    position_lines = []
 
     for _, market_id, question, yes, no, total, active, resolved, result, match_key, side, amount, entry_price in rows:
         yes_p, no_p = market_probabilities(yes, no)
@@ -750,129 +775,106 @@ Non hai ancora aperto nessuna posizione.
         total_value += current_value
         total_possible_win += possible_win
 
-        status = "🟢 ATTIVO" if active else f"⚪ CHIUSO ({result})"
+        status = "🟢 Attivo" if active else f"⚪ Chiuso ({result})"
         emoji = "🟢" if side == "YES" else "🔴"
+        short_question = question if len(question) <= 80 else question[:77] + "..."
 
-        msg += f"""📊 Mercato {market_id}
-
-❓ {question}
-
-{emoji} Posizione: {side}
-
-💸 Investito: {invested:.0f}
-📈 Valore attuale: {current_value:.0f}
-💰 Possibile vincita: {possible_win:.0f}
-📊 Profitto: {profit:+.0f} ({profit_pct:+.1f}%)
-
-{status}
-
-────────────────────
-"""
+        position_lines.append(
+            f"**Mercato {market_id}** | {emoji} **{side}** | {status}\n"
+            f"❓ {short_question}\n"
+            f"💸 Investito: **{invested:.0f}** | 📈 Valore: **{current_value:.0f}** | 💰 Vincita: **{possible_win:.0f}**\n"
+            f"📊 P/L: **{profit:+.0f}** ({profit_pct:+.1f}%)"
+        )
 
     total_profit = total_value - total_invested
     total_profit_pct = 0 if total_invested == 0 else (total_profit / total_invested) * 100
+    color = 0x22c55e if total_profit >= 0 else 0xef4444
 
-    summary = f"""📌 RIEPILOGO
+    embed = discord.Embed(
+        title=f"💼 Portafoglio di {ctx.author.display_name}",
+        color=color
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.add_field(name="💰 Saldo", value=f"{balance}", inline=True)
+    embed.add_field(name="💸 Investito", value=f"{total_invested:.0f}", inline=True)
+    embed.add_field(name="📈 Valore attuale", value=f"{total_value:.0f}", inline=True)
+    embed.add_field(name="💰 Possibile vincita", value=f"{total_possible_win:.0f}", inline=True)
+    embed.add_field(name="📊 Profitto totale", value=f"{total_profit:+.0f} ({total_profit_pct:+.1f}%)", inline=True)
+    embed.add_field(name="📌 Posizioni", value=str(len(rows)), inline=True)
 
-💸 Investito totale: {total_invested:.0f}
-📈 Valore attuale totale: {total_value:.0f}
-💰 Possibile vincita totale: {total_possible_win:.0f}
-📊 Profitto totale: {total_profit:+.0f} ({total_profit_pct:+.1f}%)
+    description = "\n\n".join(position_lines[:6])
+    if len(rows) > 6:
+        description += f"\n\n_Altre {len(rows) - 6} posizioni non mostrate._"
 
-────────────────────
+    embed.description = description
+    embed.set_footer(text="Comando disponibile anche come !portafoglio")
 
-"""
-
-    await send_long(ctx, summary + msg)
-
+    await ctx.send(embed=embed)
 
 # =========================
 # PROFILE
 # =========================
-@bot.command()
+@bot.command(aliases=["profilo"])
 async def profile(ctx):
-
     user_id = str(ctx.author.id)
     balance = get_user(user_id)
 
-    # Totale investito
-    c.execute("""
-        SELECT COALESCE(SUM(amount), 0)
-        FROM trades
-        WHERE user_id=?
-    """, (user_id,))
-    total_invested = c.fetchone()[0] or 0
+    total_invested, total_value, _, open_positions = calculate_user_open_value(user_id)
+    net_worth = balance + total_value
+    open_profit = total_value - total_invested
+    roi = 0 if total_invested == 0 else (open_profit / total_invested) * 100
 
-    # Trade totali
     c.execute("""
-        SELECT COUNT(*)
-        FROM trades
-        WHERE user_id=?
-    """, (user_id,))
-    total_trades = c.fetchone()[0] or 0
-
-    # Mercati vinti
-    c.execute("""
-        SELECT COUNT(*)
+        SELECT COUNT(DISTINCT m.id)
         FROM trades t
-        JOIN markets m ON t.market_id = m.id
+        JOIN markets m ON t.market_id=m.id
+        WHERE t.user_id=?
+          AND m.resolved=1
+    """, (user_id,))
+    resolved_markets = c.fetchone()[0] or 0
+
+    c.execute("""
+        SELECT COUNT(DISTINCT m.id)
+        FROM trades t
+        JOIN markets m ON t.market_id=m.id
         WHERE t.user_id=?
           AND m.resolved=1
           AND t.side=m.result
     """, (user_id,))
-    wins = c.fetchone()[0] or 0
+    won_markets = c.fetchone()[0] or 0
 
-    # Mercati persi
-    c.execute("""
-        SELECT COUNT(*)
-        FROM trades t
-        JOIN markets m ON t.market_id = m.id
-        WHERE t.user_id=?
-          AND m.resolved=1
-          AND t.side!=m.result
-    """, (user_id,))
-    losses = c.fetchone()[0] or 0
+    lost_markets = max(0, resolved_markets - won_markets)
+    accuracy = 0 if resolved_markets == 0 else (won_markets / resolved_markets) * 100
 
-    closed = wins + losses
-    accuracy = 0 if closed == 0 else round((wins / closed) * 100, 1)
+    c.execute("SELECT COUNT(*) FROM trades WHERE user_id=?", (user_id,))
+    total_trades = c.fetchone()[0] or 0
 
-    # Posizioni aperte
-    c.execute("""
-        SELECT COUNT(*)
-        FROM trades t
-        JOIN markets m ON t.market_id = m.id
-        WHERE t.user_id=?
-          AND m.active=1
-    """, (user_id,))
-    open_positions = c.fetchone()[0] or 0
+    color = 0x22c55e if open_profit >= 0 else 0xef4444
 
     embed = discord.Embed(
         title=f"👤 Profilo di {ctx.author.display_name}",
         description="Statistiche personali del trader",
-        color=0x22c55e
+        color=color
     )
-
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
-
-    embed.add_field(name="💰 Saldo", value=f"{balance} crediti", inline=True)
-    embed.add_field(name="💼 Investito totale", value=f"{total_invested} crediti", inline=True)
-    embed.add_field(name="📊 Trade totali", value=str(total_trades), inline=True)
-
-    embed.add_field(name="🏆 Trade vinti", value=str(wins), inline=True)
-    embed.add_field(name="❌ Trade persi", value=str(losses), inline=True)
-    embed.add_field(name="🎯 Accuracy", value=f"{accuracy}%", inline=True)
-
+    embed.add_field(name="💰 Saldo", value=f"{balance}", inline=True)
+    embed.add_field(name="💼 Patrimonio stimato", value=f"{net_worth:.0f}", inline=True)
     embed.add_field(name="🟢 Posizioni aperte", value=str(open_positions), inline=True)
-
-    embed.set_footer(text="Prediction Market Bot")
+    embed.add_field(name="💸 Investito aperto", value=f"{total_invested:.0f}", inline=True)
+    embed.add_field(name="📈 Valore aperto", value=f"{total_value:.0f}", inline=True)
+    embed.add_field(name="📊 Profitto aperto", value=f"{open_profit:+.0f} ({roi:+.1f}%)", inline=True)
+    embed.add_field(name="🏆 Mercati vinti", value=str(won_markets), inline=True)
+    embed.add_field(name="❌ Mercati persi", value=str(lost_markets), inline=True)
+    embed.add_field(name="🎯 Accuracy", value=f"{accuracy:.1f}%", inline=True)
+    embed.add_field(name="📜 Trade totali", value=str(total_trades), inline=True)
+    embed.set_footer(text="Comando disponibile anche come !profilo")
 
     await ctx.send(embed=embed)
-
 
 # =========================
 # LEADERBOARD
 # =========================
-@bot.command()
+@bot.command(aliases=["classifica"])
 async def leaderboard(ctx):
     c.execute("SELECT user_id, balance FROM users")
     users = c.fetchall()
@@ -890,27 +892,34 @@ async def leaderboard(ctx):
 
     ranking.sort(key=lambda x: x[3], reverse=True)
 
-    msg = "🏆 LEADERBOARD\n\n"
+    embed = discord.Embed(
+        title="🏆 Classifica trader",
+        description="Classifica per patrimonio stimato: saldo + valore posizioni aperte",
+        color=0xfacc15
+    )
 
     medals = ["🥇", "🥈", "🥉"]
 
     for i, (user_id, balance, open_value, net_worth) in enumerate(ranking[:10], start=1):
         medal = medals[i - 1] if i <= 3 else f"#{i}"
+        embed.add_field(
+            name=f"{medal} Posizione {i}",
+            value=(
+                f"👤 <@{user_id}>\n"
+                f"💼 Patrimonio: **{net_worth:.0f}**\n"
+                f"💰 Saldo: {balance}\n"
+                f"📈 Posizioni aperte: {open_value:.0f}"
+            ),
+            inline=False
+        )
 
-        msg += f"""{medal} <@{user_id}>
-💼 Patrimonio: {net_worth:.0f}
-💰 Saldo: {balance}
-📈 Posizioni: {open_value:.0f}
-
-"""
-
-    await ctx.send(msg)
-
+    embed.set_footer(text="Comando disponibile anche come !classifica")
+    await ctx.send(embed=embed)
 
 # =========================
 # LIVE MARKETS
 # =========================
-@bot.command()
+@bot.command(aliases=["diretta"])
 async def live(ctx):
     c.execute("""
         SELECT id, question, yes_pool, no_pool, total_pool, match_key
@@ -924,7 +933,10 @@ async def live(ctx):
         await ctx.send("📭 Nessun mercato attivo")
         return
 
-    msg = "🔴 LIVE MARKETS\n\n"
+    embed = discord.Embed(
+        title="🔴 Mercati live",
+        color=0xef4444
+    )
     found_live = False
 
     for market_id, question, yes, no, total, match_key in rows:
@@ -945,39 +957,35 @@ async def live(ctx):
             continue
 
         found_live = True
-
         yes_p, no_p = market_probabilities(yes, no)
 
         score = "N/D"
         if res["home_goals"] is not None and res["away_goals"] is not None:
             score = f'{res["home_goals"]}-{res["away_goals"]}'
 
-        msg += f"""🆔 Mercato {market_id}
-
-🏟️ {res["home"]} vs {res["away"]}
-⚽ Risultato: {score}
-📡 Stato: {res["status"]}
-
-❓ {question}
-
-🟢 YES: {yes_p}%
-🔴 NO: {no_p}%
-💰 Pool: {total}
-
-────────────────
-"""
+        embed.add_field(
+            name=f"🆔 Mercato {market_id} | {res['home']} vs {res['away']}",
+            value=(
+                f"⚽ Risultato: **{score}** | 📡 {res['status']}\n"
+                f"❓ {question}\n"
+                f"🟢 YES: **{yes_p}%** `{progress_bar(yes_p, 10)}`\n"
+                f"🔴 NO: **{no_p}%**\n"
+                f"💰 Pool: **{total}**"
+            ),
+            inline=False
+        )
 
     if not found_live:
         await ctx.send("📭 Nessun mercato live in questo momento")
         return
 
-    await send_long(ctx, msg)
-
+    embed.set_footer(text="Comando disponibile anche come !diretta")
+    await ctx.send(embed=embed)
 
 # =========================
 # BUY + PRICE UPDATE
 # =========================
-@bot.command()
+@bot.command(aliases=["compra"])
 async def buy(ctx, market_id: int, side: str, amount: int):
     user_id = str(ctx.author.id)
     side = side.upper()
@@ -1034,24 +1042,24 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     save_price(market_id, yes_p)
     conn.commit()
 
-    await ctx.send(
-f"""📈 Acquisto effettuato!
-
-🆔 Mercato {market_id}
-📊 Scommessa: {side}
-💸 Puntata: +{amount}
-
-⚖️ Nuove quote:
-🟢 YES: {yes_p}%
-🔴 NO: {no_p}%
-"""
+    embed = discord.Embed(
+        title="📈 Acquisto effettuato",
+        color=0x22c55e if side == "YES" else 0xef4444
     )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="📊 Posizione", value=side, inline=True)
+    embed.add_field(name="💸 Puntata", value=f"+{amount}", inline=True)
+    embed.add_field(name="🟢 YES", value=f"{yes_p}%", inline=True)
+    embed.add_field(name="🔴 NO", value=f"{no_p}%", inline=True)
+    embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
 
+    await ctx.send(embed=embed)
 
 # =========================
 # SELL POSITION
 # =========================
-@bot.command()
+@bot.command(aliases=["vendi"])
 async def sell(ctx, market_id: int, percent: str, side: str = None):
     user_id = str(ctx.author.id)
     pct = parse_percent(percent)
@@ -1170,31 +1178,29 @@ async def sell(ctx, market_id: int, percent: str, side: str = None):
     save_price(market_id, new_yes_p)
 
     conn.commit()
-
     bal = get_user(user_id)
 
-    await ctx.send(
-f"""💸 POSIZIONE VENDUTA
-
-🆔 Mercato {market_id}
-📊 Side: {side}
-📉 Venduto: {pct:.1f}%
-
-💰 Incassato: {proceeds}
-📊 Profitto/Perdita: {profit:+.0f}
-💼 Saldo aggiornato: {bal}
-
-⚖️ Nuove quote:
-🟢 YES: {new_yes_p}%
-🔴 NO: {new_no_p}%
-"""
+    embed = discord.Embed(
+        title="💸 Posizione venduta",
+        color=0x22c55e if profit >= 0 else 0xef4444
     )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="📊 Side", value=side, inline=True)
+    embed.add_field(name="📉 Venduto", value=f"{pct:.1f}%", inline=True)
+    embed.add_field(name="💰 Incassato", value=str(proceeds), inline=True)
+    embed.add_field(name="📊 Profitto/Perdita", value=f"{profit:+.0f}", inline=True)
+    embed.add_field(name="💼 Saldo aggiornato", value=str(bal), inline=True)
+    embed.add_field(name="🟢 YES", value=f"{new_yes_p}%", inline=True)
+    embed.add_field(name="🔴 NO", value=f"{new_no_p}%", inline=True)
+    embed.add_field(name="📉 Barra", value=f"`{progress_bar(new_yes_p)}`", inline=False)
 
+    await ctx.send(embed=embed)
 
 # =========================
 # CHART
 # =========================
-@bot.command()
+@bot.command(aliases=["grafico"])
 async def chart(ctx, market_id: int):
     c.execute("""
         SELECT timestamp, yes_price
@@ -1358,18 +1364,18 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
 
     direction = "📈" if diff > 0 else "📉"
 
-    await channel.send(
-f"""🚨 ALERT QUOTA
-
-🆔 Mercato {market_id}
-❓ {question}
-
-{direction} YES: {last_alert_yes_price:.1f}% → {yes_p:.1f}%
-🔴 NO: {no_p:.1f}%
-
-Variazione: {diff:+.1f}%
-"""
+    embed = discord.Embed(
+        title="🚨 Alert quota",
+        description=question,
+        color=0x22c55e if diff > 0 else 0xef4444
     )
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="Variazione YES", value=f"{direction} {last_alert_yes_price:.1f}% → {yes_p:.1f}%", inline=False)
+    embed.add_field(name="🔴 NO", value=f"{no_p:.1f}%", inline=True)
+    embed.add_field(name="📊 Scostamento", value=f"{diff:+.1f}%", inline=True)
+    embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
+
+    await channel.send(embed=embed)
 
     c.execute("UPDATE markets SET alert_yes_price=? WHERE id=?", (yes_p, market_id))
     conn.commit()
@@ -1441,22 +1447,19 @@ async def resolve():
                         channel = None
 
                     if channel:
-                        await channel.send(
-f"""🏁 MERCATO CHIUSO
-
-🆔 Mercato {mid}
-
-🏟️ {res["home"]} vs {res["away"]}
-⚽ Risultato finale: {score}
-
-❓ {question}
-
-✅ Esito mercato: {final}
-
-💰 Premi distribuiti: {total_paid} crediti
-🎉 Congratulazioni ai vincitori!
-"""
+                        embed = discord.Embed(
+                            title="🏁 Mercato chiuso",
+                            description=question,
+                            color=0x22c55e if final == "YES" else 0xef4444
                         )
+                        embed.add_field(name="🆔 Mercato", value=str(mid), inline=True)
+                        embed.add_field(name="✅ Esito mercato", value=final, inline=True)
+                        embed.add_field(name="💰 Premi distribuiti", value=f"{total_paid} crediti", inline=True)
+                        embed.add_field(name="🏟️ Partita", value=f'{res["home"]} vs {res["away"]}', inline=False)
+                        embed.add_field(name="⚽ Risultato finale", value=score, inline=True)
+                        embed.set_footer(text="🎉 Congratulazioni ai vincitori!")
+
+                        await channel.send(embed=embed)
 
         except Exception as e:
             print("ERR:", e)
