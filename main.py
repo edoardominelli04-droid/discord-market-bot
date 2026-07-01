@@ -3,6 +3,8 @@ import discord
 import sqlite3
 import requests
 import asyncio
+import matplotlib.pyplot as plt
+import io
 from datetime import datetime
 from discord.ext import commands
 
@@ -12,7 +14,7 @@ from discord.ext import commands
 token = os.environ.get("DISCORD_TOKEN")
 
 # =========================
-# DISCORD
+# DISCORD SETUP
 # =========================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -118,10 +120,10 @@ def get_user(user_id):
     return r[0]
 
 # =========================
-# SAVE PRICE HISTORY
+# PRICE SAVE
 # =========================
 def save_price(market_id, yes_price):
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.utcnow().strftime("%H:%M:%S")
 
     c.execute("""
         INSERT INTO price_history (market_id, timestamp, yes_price)
@@ -131,7 +133,7 @@ def save_price(market_id, yes_price):
     conn.commit()
 
 # =========================
-# COMMANDS
+# COMMANDS BASE
 # =========================
 
 @bot.command()
@@ -149,8 +151,9 @@ async def balance(ctx):
 
 @bot.command()
 async def create(ctx, league: str, match_key: str, *, question):
+
     league = league.upper()
-    allowed = ["SERIEA", "EPL", "LA_LIGA", "BUNDESGERMANY", "LIGUE1", "UCL"]
+    allowed = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
 
     if league not in allowed:
         await ctx.send("❌ Lega non valida")
@@ -167,11 +170,12 @@ async def create(ctx, league: str, match_key: str, *, question):
     await ctx.send(f"📊 Mercato creato {full}")
 
 # =========================
-# MARKET VIEW + PRICE
+# MARKETS VIEW
 # =========================
 
 @bot.command()
 async def markets(ctx):
+
     c.execute("SELECT id, question, yes_pool, no_pool FROM markets WHERE active=1")
     rows = c.fetchall()
 
@@ -200,6 +204,7 @@ async def markets(ctx):
 
 @bot.command()
 async def buy(ctx, market_id: int, side: str, amount: int):
+
     user_id = str(ctx.author.id)
     side = side.upper()
 
@@ -230,7 +235,7 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         VALUES (?, ?, ?, ?)
     """, (user_id, market_id, side, amount))
 
-    # 📊 CALCOLO PREZZO + SALVATAGGIO STORICO
+    # 📊 PRICE UPDATE
     c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
     yes, no = c.fetchone()
 
@@ -244,11 +249,12 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     await ctx.send("📈 Trade OK")
 
 # =========================
-# CHART COMMAND
+# CHART (REAL IMAGE)
 # =========================
 
 @bot.command()
 async def chart(ctx, market_id: int):
+
     c.execute("""
         SELECT timestamp, yes_price
         FROM price_history
@@ -260,21 +266,34 @@ async def chart(ctx, market_id: int):
     data = c.fetchall()
 
     if not data:
-        await ctx.send("❌ Nessun dato")
+        await ctx.send("❌ Nessun dato storico")
         return
 
-    msg = "📊 YES price trend:\n\n"
+    times = [t[0] for t in data]
+    prices = [p[1] for p in data]
 
-    for t, p in data:
-        msg += f"{t} → {round(p,2)}%\n"
+    plt.figure()
+    plt.plot(times, prices, marker="o")
 
-    await ctx.send(msg)
+    plt.title("📊 YES Price Trend")
+    plt.xlabel("Time")
+    plt.ylabel("YES %")
+    plt.xticks(rotation=45)
+
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format="png")
+    buffer.seek(0)
+
+    await ctx.send(file=discord.File(buffer, "chart.png"))
+
+    plt.close()
 
 # =========================
 # PAYOUT
 # =========================
 
 def payout_market(market_id, result):
+
     c.execute("SELECT user_id, side, amount FROM trades WHERE market_id=?", (market_id,))
     trades = c.fetchall()
 
@@ -301,13 +320,15 @@ def payout_market(market_id, result):
     conn.commit()
 
 # =========================
-# RESOLVER
+# RESOLVER LOOP
 # =========================
 
 async def resolve():
+
     await bot.wait_until_ready()
 
     while not bot.is_closed():
+
         try:
             c.execute("SELECT id, match_key FROM markets WHERE active=1 AND resolved=0")
             markets = c.fetchall()
