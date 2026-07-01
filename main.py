@@ -308,8 +308,8 @@ async def chart(ctx, market_id: int):
     ax.set_facecolor("#0e1117")
 
     # LINEE PRINCIPALI
-    ax.plot(x, yes_smooth, label="YES", linewidth=2.5, color="#00ff88")
-    ax.plot(x, no_smooth, label="NO", linewidth=2.5, color="#ff4444")
+    ax.plot(x, yes_smooth, label="YES", linewidth=2.5, color="#22c55e")
+    ax.plot(x, no_smooth, label="NO", linewidth=2.5, color="#ef4444")
 
     # LINEA 50% (DECISION THRESHOLD)
     ax.axhline(50, linestyle="--", linewidth=1, alpha=0.3, color="white")
