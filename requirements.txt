@@ -1,3 +1,5 @@
 discord.py
 requests
 matplotlib
+numpy
+scipy
