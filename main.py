@@ -4,6 +4,7 @@ import sqlite3
 import requests
 import asyncio
 import matplotlib.pyplot as plt
+plt.rcParams["font.family"] = "DejaVu Sans"
 import io
 from datetime import datetime
 from discord.ext import commands
