@@ -281,29 +281,27 @@ async def chart(ctx, market_id: int):
     prices = [d[1] for d in data]
 
     plt.style.use("dark_background")
-
     plt.figure(figsize=(9,4))
 
-    # linea stile trading
+    # ===== SMOOTH LINE =====
     x = np.arange(len(prices))
-y = np.array(prices)
+    y = np.array(prices)
 
-x_smooth = np.linspace(x.min(), x.max(), 200)
+    if len(prices) < 3:
+        plt.plot(prices, linewidth=3, color="#00ff88")
+        plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
+    else:
+        x_smooth = np.linspace(x.min(), x.max(), 200)
+        spline = make_interp_spline(x, y, k=3)
+        y_smooth = spline(x_smooth)
 
-spline = make_interp_spline(x, y, k=3)
-y_smooth = spline(x_smooth)
-
-plt.plot(x_smooth, y_smooth, linewidth=3)
-
-    # riempimento sotto linea (effetto app trading)
-    plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
+        plt.plot(x_smooth, y_smooth, linewidth=3, color="#00ff88")
+        plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
 
     plt.title("YES Market Trend", fontsize=16, fontweight="bold", color="white")
     plt.ylabel("Probability (%)")
-
     plt.grid(True, alpha=0.15)
 
-    # asse X più pulito
     step = max(1, len(times)//5)
     plt.xticks(
         range(0, len(times), step),
