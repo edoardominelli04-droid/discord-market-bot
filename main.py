@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# MARKETS (AUTO READY)
+# MARKETS
 c.execute("""
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,7 +60,7 @@ def get_user(user_id):
     return result[0]
 
 # =========================
-# BASIC COMMANDS
+# BASE COMMANDS
 # =========================
 
 @bot.command()
@@ -73,21 +73,32 @@ async def balance(ctx):
     await ctx.send(f"💰 Il tuo saldo è: {bal} crediti")
 
 # =========================
-# CREATE MARKET (AUTO READY)
+# ⚽ EUROPEAN CREATE MARKET (NUOVO)
 # =========================
 
 @bot.command()
-async def create(ctx, match_key: str, *, question):
+async def create(ctx, league: str, match_key: str, *, question):
+    league = league.upper()
+
+    allowed_leagues = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
+
+    if league not in allowed_leagues:
+        await ctx.send("❌ Lega non valida. Usa: SERIEA, EPL, LA_LIGA, BUNDESLIGA, LIGUE1, UCL")
+        return
+
+    full_match_key = f"{league}_{match_key}"
+
     c.execute(
         "INSERT INTO markets (question, yes_price, no_price, total_pool, active, match_key, resolved) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (question, 50.0, 50.0, 0, 1, match_key, 0)
+        (question, 50.0, 50.0, 0, 1, full_match_key, 0)
     )
     conn.commit()
 
     await ctx.send(
         f"📊 Mercato creato!\n"
+        f"🏆 Lega: {league}\n"
+        f"🆔 Match Key: {full_match_key}\n"
         f"❓ {question}\n"
-        f"🆔 Match ID: {match_key}\n"
         f"YES: 50% | NO: 50%"
     )
 
@@ -119,11 +130,9 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         await ctx.send("❌ Non hai abbastanza crediti")
         return
 
-    # saldo utente
     new_bal = bal - amount
     c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_bal, user_id))
 
-    # update mercato
     total_pool += amount
 
     if side == "yes":
@@ -191,15 +200,13 @@ async def market(ctx, market_id: int):
 
     mid, q, yes, no, pool = m
 
-    msg = (
+    await ctx.send(
         f"📊 **MERCATO {mid}**\n\n"
         f"❓ {q}\n\n"
         f"🟢 YES: {yes:.1f}%\n"
         f"🔴 NO: {no:.1f}%\n\n"
         f"💰 Pool: {pool}\n"
     )
-
-    await ctx.send(msg)
 
 # =========================
 # READY
