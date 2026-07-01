@@ -4,8 +4,12 @@ import sqlite3
 import requests
 import asyncio
 import matplotlib.pyplot as plt
-plt.rcParams["font.family"] = "DejaVu Sans"
 import io
+
+plt.style.use("dark_background")
+plt.rcParams["font.family"] = "DejaVu Sans"
+plt.rcParams["axes.titleweight"] = "bold"
+plt.rcParams["axes.labelsize"] = 11
 from datetime import datetime
 from discord.ext import commands
 
@@ -283,7 +287,7 @@ async def chart(ctx, market_id: int):
     # riempimento sotto linea (effetto app trading)
     plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
 
-    plt.title("📊 YES Market Price", fontsize=14, color="white")
+    plt.title("YES Market Trend", fontsize=16, fontweight="bold", color="white")
     plt.ylabel("Probability (%)")
 
     plt.grid(True, alpha=0.15)
