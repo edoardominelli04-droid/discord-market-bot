@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS markets (
     total_pool INTEGER,
     active INTEGER,
     match_key TEXT,
-    resolved INTEGER DEFAULT 0
+    resolved INTEGER DEFAULT 0,
+    result TEXT
 )
 """)
 
@@ -113,7 +114,7 @@ def get_user(user_id):
     return result[0]
 
 # =========================
-# COMMANDS BASE
+# COMMANDS
 # =========================
 
 @bot.command()
@@ -151,12 +152,86 @@ async def create(ctx, league: str, match_key: str, *, question):
     full_match_key = f"{league}_{match_key}"
 
     c.execute(
-        "INSERT INTO markets (question, yes_price, no_price, total_pool, active, match_key, resolved) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (question, 50.0, 50.0, 0, 1, full_match_key, 0)
+        "INSERT INTO markets (question, yes_price, no_price, total_pool, active, match_key, resolved, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (question, 50.0, 50.0, 0, 1, full_match_key, 0, None)
     )
     conn.commit()
 
     await ctx.send(f"📊 Mercato creato: {full_match_key}")
+
+# =========================
+# BUY SYSTEM
+# =========================
+
+@bot.command()
+async def buy(ctx, market_id: int, side: str, amount: int):
+    side = side.lower()
+
+    if side not in ["yes", "no"]:
+        await ctx.send("❌ Usa YES o NO")
+        return
+
+    c.execute("SELECT yes_price, no_price, total_pool FROM markets WHERE id=?", (market_id,))
+    market = c.fetchone()
+
+    if not market:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    yes_price, no_price, total_pool = market
+
+    user_id = str(ctx.author.id)
+    bal = get_user(user_id)
+
+    if amount > bal:
+        await ctx.send("❌ Non hai abbastanza crediti")
+        return
+
+    new_bal = bal - amount
+    c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_bal, user_id))
+
+    total_pool += amount
+
+    if side == "yes":
+        yes_price += amount * 0.05
+        no_price -= amount * 0.03
+    else:
+        no_price += amount * 0.05
+        yes_price -= amount * 0.03
+
+    yes_price = max(1, min(99, yes_price))
+    no_price = max(1, min(99, no_price))
+
+    c.execute("""
+        UPDATE markets
+        SET yes_price=?, no_price=?, total_pool=?
+        WHERE id=?
+    """, (yes_price, no_price, total_pool, market_id))
+
+    conn.commit()
+
+    await ctx.send(f"📈 Acquisto OK | Market {market_id}")
+
+# =========================
+# LIST MARKETS
+# =========================
+
+@bot.command()
+async def markets(ctx):
+    c.execute("SELECT id, question, yes_price, no_price, total_pool FROM markets WHERE active=1")
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Nessun mercato attivo")
+        return
+
+    msg = "📊 **MERCATI ATTIVI**\n\n"
+
+    for m in rows:
+        mid, q, yes, no, pool = m
+        msg += f"ID {mid} | {q}\nYES {yes:.1f}% | NO {no:.1f}%\n\n"
+
+    await ctx.send(msg)
 
 # =========================
 # AUTO RESOLVE ENGINE
@@ -186,31 +261,36 @@ async def resolve_markets():
 
                 winner = result["winner"]
 
-                # chiusura mercato
+                # YES se vince la prima squadra
+                if winner == team1:
+                    final_result = "YES"
+                else:
+                    final_result = "NO"
+
                 c.execute("""
                     UPDATE markets
-                    SET active=0, resolved=1
+                    SET active=0,
+                        resolved=1,
+                        result=?
                     WHERE id=?
-                """, (market_id,))
+                """, (final_result, market_id))
 
                 conn.commit()
 
-                print(f"Market {market_id} chiuso. Winner: {winner}")
+                print(f"Market {market_id} chiuso -> {final_result}")
 
         except Exception as e:
             print("Resolver error:", e)
 
-        await asyncio.sleep(120)  # ogni 2 minuti
+        await asyncio.sleep(120)
 
 # =========================
-# READY EVENT
+# READY
 # =========================
 
 @bot.event
 async def on_ready():
     print(f"Bot online come {bot.user}")
-
-    # avvia loop automatico
     bot.loop.create_task(resolve_markets())
 
 # =========================
