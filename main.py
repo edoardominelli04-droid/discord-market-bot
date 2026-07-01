@@ -307,12 +307,29 @@ async def testmatch(ctx, match_id: int):
 # FIND MATCHES
 # =========================
 @bot.command()
-async def today(ctx):
+async def today(ctx, competition: str = "WC"):
+
+    competition = competition.upper()
+
+    if competition not in COMPETITIONS:
+        await ctx.send(
+f"""❌ Competizione non riconosciuta.
+
+Usa:
+!competitions
+
+Esempio:
+!today WC
+!today SA
+!today PL
+"""
+        )
+        return
 
     today_date = datetime.now(timezone.utc).date().isoformat()
 
     status_code, data = api_get(
-        "/matches",
+        f"/competitions/{competition}/matches",
         {
             "dateFrom": today_date,
             "dateTo": today_date
@@ -326,22 +343,22 @@ async def today(ctx):
     matches = data.get("matches", [])
 
     if not matches:
-        await ctx.send("📭 Nessuna partita trovata oggi da football-data.org")
+        await ctx.send(f"📭 Nessuna partita trovata oggi per {COMPETITIONS[competition]}")
         return
 
-    msg = "📅 PARTITE DI OGGI\n\n"
+    msg = f"📅 PARTITE DI OGGI | {COMPETITIONS[competition]}\n\n"
 
     for m in matches[:15]:
         mid = m["id"]
         home = m["homeTeam"]["name"]
         away = m["awayTeam"]["name"]
         status = m["status"]
-        comp = m["competition"]["name"]
+        utc_date = m.get("utcDate", "N/D")
 
         msg += f"""🆔 Match ID: {mid}
-🏆 {comp}
 🏟️ {home} vs {away}
 📡 Stato: {status}
+🕒 UTC: {utc_date}
 
 ────────────────
 """
