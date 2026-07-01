@@ -278,29 +278,46 @@ async def chart(ctx, market_id: int):
         return
 
     times = [d[0] for d in data]
-    prices = [d[1] for d in data]
+    yes_prices = [d[1] for d in data]
+    no_prices = [100 - p for p in yes_prices]
 
     plt.style.use("dark_background")
     plt.figure(figsize=(9,4))
 
-    # ===== SMOOTH LINE =====
-    x = np.arange(len(prices))
-    y = np.array(prices)
+    x = np.arange(len(yes_prices))
 
-    if len(prices) < 3:
-        plt.plot(prices, linewidth=3, color="#00ff88")
-        plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
+    # =========================
+    # SMOOTH YES
+    # =========================
+    if len(yes_prices) < 3:
+        plt.plot(x, yes_prices, linewidth=3, color="#00ff88", label="YES")
+        plt.plot(x, no_prices, linewidth=3, color="#ff4444", label="NO")
     else:
         x_smooth = np.linspace(x.min(), x.max(), 200)
-        spline = make_interp_spline(x, y, k=3)
-        y_smooth = spline(x_smooth)
 
-        plt.plot(x_smooth, y_smooth, linewidth=3, color="#00ff88")
-        plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
+        spline_yes = make_interp_spline(x, yes_prices, k=3)
+        spline_no = make_interp_spline(x, no_prices, k=3)
 
-    plt.title("YES Market Trend", fontsize=16, fontweight="bold", color="white")
+        yes_smooth = spline_yes(x_smooth)
+        no_smooth = spline_no(x_smooth)
+
+        plt.plot(x_smooth, yes_smooth, linewidth=3, color="#00ff88", label="YES")
+        plt.plot(x_smooth, no_smooth, linewidth=3, color="#ff4444", label="NO")
+
+    # =========================
+    # AREA FILL (SOFT)
+    # =========================
+    plt.fill_between(x, yes_prices, alpha=0.08, color="#00ff88")
+    plt.fill_between(x, no_prices, alpha=0.05, color="#ff4444")
+
+    # =========================
+    # STYLE
+    # =========================
+    plt.title("Market Probability (YES vs NO)", fontsize=16, fontweight="bold", color="white")
     plt.ylabel("Probability (%)")
+
     plt.grid(True, alpha=0.15)
+    plt.legend()
 
     step = max(1, len(times)//5)
     plt.xticks(
