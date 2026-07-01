@@ -472,20 +472,20 @@ Prova prima:
     away = res["away"]
     status = res["status"]
 
-c.execute("""
-    INSERT INTO markets (
-        question,
-        yes_pool,
-        no_pool,
-        total_pool,
-        active,
-        match_key,
-        resolved,
-        result,
-        channel_id
-    )
-    VALUES (?, 0, 0, 0, 1, ?, 0, NULL, ?)
-""", (question, f"MATCH_{match_id}", str(ctx.channel.id)))
+    c.execute("""
+        INSERT INTO markets (
+            question,
+            yes_pool,
+            no_pool,
+            total_pool,
+            active,
+            match_key,
+            resolved,
+            result,
+            channel_id
+        )
+        VALUES (?, 0, 0, 0, 1, ?, 0, NULL, ?)
+    """, (question, f"MATCH_{match_id}", str(ctx.channel.id)))
 
     market_id = c.lastrowid
     conn.commit()
