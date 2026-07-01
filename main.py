@@ -10,10 +10,9 @@ plt.style.use("dark_background")
 plt.rcParams["font.family"] = "DejaVu Sans"
 plt.rcParams["axes.titleweight"] = "bold"
 plt.rcParams["axes.labelsize"] = 11
+
 from datetime import datetime
 from discord.ext import commands
-from scipy.interpolate import make_interp_spline
-import numpy as np
 
 
 # =========================
@@ -35,12 +34,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 API_KEY = os.environ.get("FOOTBALL_API_KEY")
 HEADERS = {"x-apisports-key": API_KEY}
 
+ALLOWED_LEAGUES = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
+
+
 def get_match_result(team1, team2):
     url = "https://v3.football.api-sports.io/fixtures"
     params = {"search": f"{team1} {team2}"}
 
     try:
-        r = requests.get(url, headers=HEADERS, params=params)
+        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
         data = r.json()
     except:
         return None
@@ -65,10 +67,28 @@ def get_match_result(team1, team2):
     else:
         return {"winner": "DRAW"}
 
+
+def parse_match_key(match_key):
+    for league in sorted(ALLOWED_LEAGUES, key=len, reverse=True):
+        prefix = f"{league}_"
+
+        if match_key.startswith(prefix):
+            teams = match_key[len(prefix):]
+
+            try:
+                team1, team2 = teams.split("_", 1)
+            except:
+                return None
+
+            return league, team1, team2
+
+    return None
+
+
 # =========================
 # DATABASE
 # =========================
-conn = sqlite3.connect("bot.db")
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
@@ -113,6 +133,7 @@ CREATE TABLE IF NOT EXISTS price_history (
 
 conn.commit()
 
+
 # =========================
 # USERS
 # =========================
@@ -127,6 +148,7 @@ def get_user(user_id):
 
     return r[0]
 
+
 # =========================
 # PRICE SAVE
 # =========================
@@ -140,30 +162,30 @@ def save_price(market_id, yes_price):
 
     conn.commit()
 
+
 # =========================
 # COMMANDS BASE
 # =========================
-
 @bot.command()
 async def ping(ctx):
     await ctx.send("pong 🟢")
+
 
 @bot.command()
 async def balance(ctx):
     bal = get_user(str(ctx.author.id))
     await ctx.send(f"💰 {bal}")
 
+
 # =========================
 # CREATE MARKET
 # =========================
-
 @bot.command()
 async def create(ctx, league: str, match_key: str, *, question):
 
     league = league.upper()
-    allowed = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
 
-    if league not in allowed:
+    if league not in ALLOWED_LEAGUES:
         await ctx.send("❌ Lega non valida")
         return
 
@@ -173,14 +195,29 @@ async def create(ctx, league: str, match_key: str, *, question):
         INSERT INTO markets VALUES (NULL, ?, 0, 0, 0, 1, ?, 0, NULL)
     """, (question, full))
 
+    market_id = c.lastrowid
     conn.commit()
 
-    await ctx.send(f"📊 Mercato creato {full}")
+    await ctx.send(
+f"""📊 Mercato creato!
+
+🏆 Lega: {league}
+🆔 ID Mercato: {market_id}
+🆔 Match: {full}
+
+❓ Domanda:
+{question}
+
+⚖️ Quote iniziali:
+🟢 YES: 50%
+🔴 NO: 50%
+"""
+    )
+
 
 # =========================
 # MARKETS VIEW
 # =========================
-
 @bot.command()
 async def markets(ctx):
 
@@ -188,33 +225,90 @@ async def markets(ctx):
     rows = c.fetchall()
 
     if not rows:
-        await ctx.send("📭 Nessun mercato")
+        await ctx.send("📭 Nessun mercato attivo")
         return
 
-    msg = "📊 MERCATI\n\n"
+    msg = "📊 MERCATI ATTIVI\n\n"
 
     for mid, q, yes, no in rows:
         total = yes + no
+        yp = 50 if total == 0 else round((yes / total) * 100, 1)
+        np = 100 - yp
 
-        if total == 0:
-            yp, np = 50, 50
-        else:
-            yp = round((yes / total) * 100, 2)
-            np = round((no / total) * 100, 2)
+        msg += f"""🆔 {mid}
+❓ {q}
 
-        msg += f"ID {mid} | {q}\nYES {yp}% | NO {np}%\n\n"
+🟢 YES: {yp}%
+🔴 NO: {np}%
+💰 Pool: {total}
+
+────────────────
+"""
 
     await ctx.send(msg)
+
+
+# =========================
+# SINGLE MARKET VIEW
+# =========================
+@bot.command()
+async def market(ctx, market_id: int):
+
+    c.execute("""
+        SELECT question, yes_pool, no_pool, active, resolved, result
+        FROM markets
+        WHERE id=?
+    """, (market_id,))
+
+    row = c.fetchone()
+
+    if not row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    q, yes, no, active, resolved, result = row
+    total = yes + no
+
+    yes_p = 50 if total == 0 else round((yes / total) * 100, 1)
+    no_p = 100 - yes_p
+
+    if active == 1:
+        status = "ATTIVO"
+    elif resolved == 1:
+        status = f"CHIUSO | Risultato: {result}"
+    else:
+        status = "CHIUSO"
+
+    await ctx.send(
+f"""📊 MERCATO #{market_id}
+
+❓ {q}
+
+🟢 YES: {yes_p}%
+🔴 NO: {no_p}%
+
+💰 Pool totale: {total}
+📉 Stato: {status}
+"""
+    )
+
 
 # =========================
 # BUY + PRICE UPDATE
 # =========================
-
 @bot.command()
 async def buy(ctx, market_id: int, side: str, amount: int):
 
     user_id = str(ctx.author.id)
     side = side.upper()
+
+    if amount <= 0:
+        await ctx.send("❌ Importo non valido")
+        return
+
+    if side not in ["YES", "NO"]:
+        await ctx.send("❌ Side non valido (YES/NO)")
+        return
 
     c.execute("SELECT active FROM markets WHERE id=?", (market_id,))
     m = c.fetchone()
@@ -232,34 +326,52 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     c.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, user_id))
 
     if side == "YES":
-        c.execute("UPDATE markets SET yes_pool = yes_pool + ?, total_pool = total_pool + ? WHERE id=?",
-                  (amount, amount, market_id))
+        c.execute("""
+            UPDATE markets
+            SET yes_pool = yes_pool + ?,
+                total_pool = total_pool + ?
+            WHERE id=?
+        """, (amount, amount, market_id))
     else:
-        c.execute("UPDATE markets SET no_pool = no_pool + ?, total_pool = total_pool + ? WHERE id=?",
-                  (amount, amount, market_id))
+        c.execute("""
+            UPDATE markets
+            SET no_pool = no_pool + ?,
+                total_pool = total_pool + ?
+            WHERE id=?
+        """, (amount, amount, market_id))
 
     c.execute("""
         INSERT INTO trades (user_id, market_id, side, amount)
         VALUES (?, ?, ?, ?)
     """, (user_id, market_id, side, amount))
 
-    # 📊 PRICE UPDATE
     c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
     yes, no = c.fetchone()
 
     total = yes + no
-    yes_price = 50 if total == 0 else (yes / total) * 100
+    yes_p = 50 if total == 0 else round((yes / total) * 100, 1)
+    no_p = round(100 - yes_p, 1)
 
-    save_price(market_id, yes_price)
-
+    save_price(market_id, yes_p)
     conn.commit()
 
-    await ctx.send("📈 Trade OK")
+    await ctx.send(
+f"""📈 Acquisto effettuato!
+
+🆔 Mercato {market_id}
+📊 Scommessa: {side}
+💸 Puntata: +{amount}
+
+⚖️ Nuove quote:
+🟢 YES: {yes_p}%
+🔴 NO: {no_p}%
+"""
+    )
+
 
 # =========================
 # CHART (REAL IMAGE)
 # =========================
-
 @bot.command()
 async def chart(ctx, market_id: int):
 
@@ -284,7 +396,7 @@ async def chart(ctx, market_id: int):
     yes_prices = [d[1] for d in data]
     no_prices = [100 - y for y in yes_prices]
 
-    x = list(range(len(yes_prices)))  # più stabile dei timestamp
+    x = list(range(len(yes_prices)))
 
     # =========================
     # SMOOTH (MOVING AVERAGE LEGGERO)
@@ -292,6 +404,7 @@ async def chart(ctx, market_id: int):
     def smooth(arr, window=3):
         if len(arr) < window:
             return arr
+
         return [
             sum(arr[max(0, i-window):i+1]) / min(i+1, window)
             for i in range(len(arr))
@@ -352,79 +465,10 @@ async def chart(ctx, market_id: int):
 
     plt.close()
 
-    # =========================
-    # PLOT CANDLESTICK
-    # =========================
-    plt.style.use("dark_background")
-    fig, ax = plt.subplots(figsize=(9,4))
-
-    for i, (o, h, l, c_) in enumerate(ohlc):
-        color = "#00ff88" if c_ >= o else "#ff4444"
-
-        # wick
-        ax.plot([i, i], [l, h], color=color, linewidth=1)
-
-        # body
-        ax.plot([i, i], [o, c_], color=color, linewidth=6)
-
-    # =========================
-    # STYLE
-    # =========================
-    ax.set_title("Market Candlestick (YES sentiment)", fontsize=16, fontweight="bold")
-    ax.set_ylabel("Probability (%)")
-    ax.grid(True, alpha=0.15)
-
-    step = max(1, len(times)//5)
-    ax.set_xticks(range(0, len(times), step))
-    ax.set_xticklabels([times[i] for i in range(0, len(times), step)], rotation=30)
-
-    buffer = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buffer, format="png", facecolor="#0e1117")
-    buffer.seek(0)
-
-    await ctx.send(file=discord.File(buffer, "candles.png"))
-
-    plt.close()
-
-    # =========================
-    # AREA FILL (SOFT)
-    # =========================
-    plt.fill_between(x, yes_prices, alpha=0.08, color="#00ff88")
-    plt.fill_between(x, no_prices, alpha=0.05, color="#ff4444")
-
-    # =========================
-    # STYLE
-    # =========================
-    plt.title("Market Probability (YES vs NO)", fontsize=16, fontweight="bold", color="white")
-    plt.ylabel("Probability (%)")
-
-    plt.grid(True, alpha=0.15)
-    plt.legend()
-
-    step = max(1, len(times)//5)
-    plt.xticks(
-        range(0, len(times), step),
-        [times[i] for i in range(0, len(times), step)],
-        rotation=30,
-        color="white"
-    )
-
-    plt.yticks(color="white")
-
-    buffer = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buffer, format="png", facecolor="#0e1117")
-    buffer.seek(0)
-
-    await ctx.send(file=discord.File(buffer, "chart.png"))
-
-    plt.close()
 
 # =========================
 # PAYOUT
 # =========================
-
 def payout_market(market_id, result):
 
     c.execute("SELECT user_id, side, amount FROM trades WHERE market_id=?", (market_id,))
@@ -452,10 +496,10 @@ def payout_market(market_id, result):
 
     conn.commit()
 
+
 # =========================
 # RESOLVER LOOP
 # =========================
-
 async def resolve():
 
     await bot.wait_until_ready()
@@ -469,14 +513,17 @@ async def resolve():
             for mid, mk in markets:
 
                 c.execute("SELECT resolved FROM markets WHERE id=?", (mid,))
-                if c.fetchone()[0] == 1:
+                row = c.fetchone()
+
+                if row and row[0] == 1:
                     continue
 
-                try:
-                    league, teams = mk.split("_", 1)
-                    t1, t2 = teams.split("_")
-                except:
+                parsed = parse_match_key(mk)
+
+                if not parsed:
                     continue
+
+                league, t1, t2 = parsed
 
                 res = get_match_result(t1, t2)
 
@@ -509,17 +556,17 @@ async def resolve():
 
         await asyncio.sleep(120)
 
+
 # =========================
 # READY
 # =========================
-
 @bot.event
 async def on_ready():
     print(f"Bot online {bot.user}")
     bot.loop.create_task(resolve())
 
+
 # =========================
 # RUN
 # =========================
-
 bot.run(token)
