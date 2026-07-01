@@ -179,6 +179,64 @@ async def balance(ctx):
 
 
 # =========================
+# API TEST COMMANDS
+# =========================
+@bot.command()
+async def checkapi(ctx):
+
+    if not API_KEY:
+        await ctx.send("❌ FOOTBALL_API_KEY non trovata nelle variabili ambiente")
+        return
+
+    await ctx.send("✅ FOOTBALL_API_KEY caricata correttamente")
+
+
+@bot.command()
+async def testfixture(ctx, fixture_id: int):
+
+    url = "https://v3.football.api-sports.io/fixtures"
+    params = {"id": fixture_id}
+
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        data = r.json()
+    except Exception as e:
+        await ctx.send(f"❌ Errore richiesta API: {e}")
+        return
+
+    errors = data.get("errors")
+    response = data.get("response", [])
+
+    msg = f"""🧪 TEST FIXTURE
+
+🆔 Fixture ID: {fixture_id}
+📡 Status HTTP: {r.status_code}
+
+📦 Results: {data.get("results")}
+💬 Errors: {errors}
+📊 Response trovate: {len(response)}
+"""
+
+    if response:
+        match = response[0]
+        home = match["teams"]["home"]["name"]
+        away = match["teams"]["away"]["name"]
+        status = match["fixture"]["status"]["short"]
+        gh = match["goals"]["home"]
+        ga = match["goals"]["away"]
+
+        msg += f"""
+🏟️ Partita:
+{home} vs {away}
+
+📡 Stato API: {status}
+⚽ Risultato: {gh}-{ga}
+"""
+
+    await ctx.send(msg)
+
+
+# =========================
 # CREATE MARKET FROM FIXTURE API
 # =========================
 @bot.command()
@@ -187,7 +245,14 @@ async def createfixture(ctx, fixture_id: int, *, question):
     res = get_fixture_result(fixture_id)
 
     if not res:
-        await ctx.send("❌ Fixture non trovata nell'API")
+        await ctx.send(
+f"""❌ Fixture non trovata nell'API
+
+Prova prima:
+!checkapi
+!testfixture {fixture_id}
+"""
+        )
         return
 
     if res["finished"]:
@@ -416,18 +481,12 @@ async def chart(ctx, market_id: int):
         await ctx.send("❌ Dati insufficienti")
         return
 
-    # =========================
-    # PREPARAZIONE DATI
-    # =========================
     times = [d[0] for d in data]
     yes_prices = [d[1] for d in data]
     no_prices = [100 - y for y in yes_prices]
 
     x = list(range(len(yes_prices)))
 
-    # =========================
-    # SMOOTH (MOVING AVERAGE LEGGERO)
-    # =========================
     def smooth(arr, window=3):
         if len(arr) < window:
             return arr
@@ -440,34 +499,24 @@ async def chart(ctx, market_id: int):
     yes_smooth = smooth(yes_prices)
     no_smooth = smooth(no_prices)
 
-    # =========================
-    # GRAFICO
-    # =========================
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0e1117")
     ax.set_facecolor("#0e1117")
 
-    # LINEE PRINCIPALI
     ax.plot(x, yes_smooth, label="YES", linewidth=2.5, color="#22c55e")
     ax.plot(x, no_smooth, label="NO", linewidth=2.5, color="#ef4444")
 
-    # LINEA 50% (DECISION THRESHOLD)
     ax.axhline(50, linestyle="--", linewidth=1, alpha=0.3, color="white")
 
-    # AREA LEGGERA (molto soft)
     ax.fill_between(x, yes_smooth, alpha=0.10, color="#00ff88")
     ax.fill_between(x, no_smooth, alpha=0.05, color="#ff4444")
 
-    # =========================
-    # STILE
-    # =========================
     ax.set_title("Market Probability", fontsize=15, fontweight="bold", color="white")
     ax.set_ylabel("Probability (%)", color="white")
     ax.set_ylim(0, 100)
 
     ax.grid(True, alpha=0.15)
 
-    # X LABELS RIDOTTE (NON SPAM)
     step = max(1, len(x)//6)
     ax.set_xticks(range(0, len(x), step))
     ax.set_xticklabels(
@@ -481,9 +530,6 @@ async def chart(ctx, market_id: int):
 
     plt.tight_layout()
 
-    # =========================
-    # OUTPUT DISCORD
-    # =========================
     buffer = io.BytesIO()
     plt.savefig(buffer, format="png", facecolor="#0e1117")
     buffer.seek(0)
