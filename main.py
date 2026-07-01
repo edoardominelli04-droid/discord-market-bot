@@ -3,6 +3,7 @@ import discord
 import sqlite3
 import requests
 import asyncio
+from datetime import datetime
 from discord.ext import commands
 
 # =========================
@@ -11,7 +12,7 @@ from discord.ext import commands
 token = os.environ.get("DISCORD_TOKEN")
 
 # =========================
-# DISCORD SETUP
+# DISCORD
 # =========================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -22,7 +23,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # API FOOTBALL
 # =========================
 API_KEY = os.environ.get("FOOTBALL_API_KEY")
-
 HEADERS = {"x-apisports-key": API_KEY}
 
 def get_match_result(team1, team2):
@@ -40,14 +40,13 @@ def get_match_result(team1, team2):
 
     match = data["response"][0]
 
-    status = match["fixture"]["status"]["short"]
+    if match["fixture"]["status"]["short"] != "FT":
+        return None
+
     home = match["teams"]["home"]["name"]
     away = match["teams"]["away"]["name"]
     gh = match["goals"]["home"]
     ga = match["goals"]["away"]
-
-    if status != "FT":
-        return None
 
     if gh > ga:
         return {"winner": home}
@@ -93,6 +92,15 @@ CREATE TABLE IF NOT EXISTS trades (
 )
 """)
 
+c.execute("""
+CREATE TABLE IF NOT EXISTS price_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id INTEGER,
+    timestamp TEXT,
+    yes_price REAL
+)
+""")
+
 conn.commit()
 
 # =========================
@@ -108,6 +116,19 @@ def get_user(user_id):
         return 1000
 
     return r[0]
+
+# =========================
+# SAVE PRICE HISTORY
+# =========================
+def save_price(market_id, yes_price):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    c.execute("""
+        INSERT INTO price_history (market_id, timestamp, yes_price)
+        VALUES (?, ?, ?)
+    """, (market_id, now, yes_price))
+
+    conn.commit()
 
 # =========================
 # COMMANDS
@@ -129,8 +150,7 @@ async def balance(ctx):
 @bot.command()
 async def create(ctx, league: str, match_key: str, *, question):
     league = league.upper()
-
-    allowed = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
+    allowed = ["SERIEA", "EPL", "LA_LIGA", "BUNDESGERMANY", "LIGUE1", "UCL"]
 
     if league not in allowed:
         await ctx.send("❌ Lega non valida")
@@ -147,7 +167,7 @@ async def create(ctx, league: str, match_key: str, *, question):
     await ctx.send(f"📊 Mercato creato {full}")
 
 # =========================
-# MARKET VIEW (POOL PRICES)
+# MARKET VIEW + PRICE
 # =========================
 
 @bot.command()
@@ -175,7 +195,7 @@ async def markets(ctx):
     await ctx.send(msg)
 
 # =========================
-# BUY (POOL SYSTEM)
+# BUY + PRICE UPDATE
 # =========================
 
 @bot.command()
@@ -210,9 +230,45 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         VALUES (?, ?, ?, ?)
     """, (user_id, market_id, side, amount))
 
+    # 📊 CALCOLO PREZZO + SALVATAGGIO STORICO
+    c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
+    yes, no = c.fetchone()
+
+    total = yes + no
+    yes_price = 50 if total == 0 else (yes / total) * 100
+
+    save_price(market_id, yes_price)
+
     conn.commit()
 
     await ctx.send("📈 Trade OK")
+
+# =========================
+# CHART COMMAND
+# =========================
+
+@bot.command()
+async def chart(ctx, market_id: int):
+    c.execute("""
+        SELECT timestamp, yes_price
+        FROM price_history
+        WHERE market_id=?
+        ORDER BY id ASC
+        LIMIT 50
+    """, (market_id,))
+
+    data = c.fetchall()
+
+    if not data:
+        await ctx.send("❌ Nessun dato")
+        return
+
+    msg = "📊 YES price trend:\n\n"
+
+    for t, p in data:
+        msg += f"{t} → {round(p,2)}%\n"
+
+    await ctx.send(msg)
 
 # =========================
 # PAYOUT
