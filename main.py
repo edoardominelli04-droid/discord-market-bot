@@ -2,6 +2,7 @@ import os
 import discord
 import sqlite3
 import requests
+import asyncio
 from discord.ext import commands
 
 # =========================
@@ -124,10 +125,6 @@ async def balance(ctx):
     bal = get_user(str(ctx.author.id))
     await ctx.send(f"💰 Il tuo saldo è: {bal} crediti")
 
-# =========================
-# CHECK API (NUOVO)
-# =========================
-
 @bot.command()
 async def checkapi(ctx):
     key = os.environ.get("FOOTBALL_API_KEY")
@@ -138,7 +135,7 @@ async def checkapi(ctx):
         await ctx.send("❌ FOOTBALL_API_KEY mancante")
 
 # =========================
-# CREATE MARKET (EUROPE)
+# CREATE MARKET
 # =========================
 
 @bot.command()
@@ -159,127 +156,62 @@ async def create(ctx, league: str, match_key: str, *, question):
     )
     conn.commit()
 
-    await ctx.send(
-        f"📊 Mercato creato!\n"
-        f"🏆 {league}\n"
-        f"🆔 {full_match_key}\n"
-        f"❓ {question}\n"
-        f"YES: 50% | NO: 50%"
-    )
+    await ctx.send(f"📊 Mercato creato: {full_match_key}")
 
 # =========================
-# BUY SYSTEM
+# AUTO RESOLVE ENGINE
 # =========================
 
-@bot.command()
-async def buy(ctx, market_id: int, side: str, amount: int):
-    side = side.lower()
+async def resolve_markets():
+    await bot.wait_until_ready()
 
-    if side not in ["yes", "no"]:
-        await ctx.send("❌ Usa YES o NO")
-        return
+    while not bot.is_closed():
+        try:
+            c.execute("SELECT id, match_key FROM markets WHERE active=1 AND resolved=0")
+            markets = c.fetchall()
 
-    c.execute("SELECT yes_price, no_price, total_pool FROM markets WHERE id=?", (market_id,))
-    market = c.fetchone()
+            for market in markets:
+                market_id, match_key = market
 
-    if not market:
-        await ctx.send("❌ Mercato non trovato")
-        return
+                try:
+                    league, teams = match_key.split("_", 1)
+                    team1, team2 = teams.split("_")
+                except:
+                    continue
 
-    yes_price, no_price, total_pool = market
+                result = get_match_result(team1, team2)
 
-    user_id = str(ctx.author.id)
-    bal = get_user(user_id)
+                if result is None:
+                    continue
 
-    if amount > bal:
-        await ctx.send("❌ Non hai abbastanza crediti")
-        return
+                winner = result["winner"]
 
-    new_bal = bal - amount
-    c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_bal, user_id))
+                # chiusura mercato
+                c.execute("""
+                    UPDATE markets
+                    SET active=0, resolved=1
+                    WHERE id=?
+                """, (market_id,))
 
-    total_pool += amount
+                conn.commit()
 
-    if side == "yes":
-        yes_price += amount * 0.05
-        no_price -= amount * 0.03
-    else:
-        no_price += amount * 0.05
-        yes_price -= amount * 0.03
+                print(f"Market {market_id} chiuso. Winner: {winner}")
 
-    yes_price = max(1, min(99, yes_price))
-    no_price = max(1, min(99, no_price))
+        except Exception as e:
+            print("Resolver error:", e)
 
-    c.execute("""
-        UPDATE markets
-        SET yes_price=?, no_price=?, total_pool=?
-        WHERE id=?
-    """, (yes_price, no_price, total_pool, market_id))
-
-    conn.commit()
-
-    await ctx.send(
-        f"📈 Acquisto OK!\n"
-        f"Market {market_id} | {side.upper()} +{amount}\n"
-        f"YES: {yes_price:.1f}% | NO: {no_price:.1f}%"
-    )
+        await asyncio.sleep(120)  # ogni 2 minuti
 
 # =========================
-# MARKETS LIST
-# =========================
-
-@bot.command()
-async def markets(ctx):
-    c.execute("SELECT id, question, yes_price, no_price, total_pool FROM markets WHERE active=1")
-    rows = c.fetchall()
-
-    if not rows:
-        await ctx.send("📭 Nessun mercato attivo")
-        return
-
-    msg = "📊 **MERCATI ATTIVI**\n\n"
-
-    for m in rows:
-        mid, q, yes, no, pool = m
-        msg += (
-            f"**ID {mid}**\n"
-            f"{q}\n"
-            f"YES: {yes:.1f}% | NO: {no:.1f}%\n"
-            f"Pool: {pool}\n\n"
-        )
-
-    await ctx.send(msg)
-
-# =========================
-# SINGLE MARKET
-# =========================
-
-@bot.command()
-async def market(ctx, market_id: int):
-    c.execute("SELECT id, question, yes_price, no_price, total_pool FROM markets WHERE id=?", (market_id,))
-    m = c.fetchone()
-
-    if not m:
-        await ctx.send("❌ Mercato non trovato")
-        return
-
-    mid, q, yes, no, pool = m
-
-    await ctx.send(
-        f"📊 **MERCATO {mid}**\n\n"
-        f"❓ {q}\n\n"
-        f"🟢 YES: {yes:.1f}%\n"
-        f"🔴 NO: {no:.1f}%\n\n"
-        f"💰 Pool: {pool}\n"
-    )
-
-# =========================
-# READY
+# READY EVENT
 # =========================
 
 @bot.event
 async def on_ready():
     print(f"Bot online come {bot.user}")
+
+    # avvia loop automatico
+    bot.loop.create_task(resolve_markets())
 
 # =========================
 # RUN
