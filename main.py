@@ -25,6 +25,7 @@ token = os.environ.get("DISCORD_TOKEN")
 # =========================
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -38,6 +39,12 @@ HEADERS = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
 # Se una quota cambia di almeno questa percentuale rispetto all'ultimo alert,
 # il bot invia un messaggio nel canale del mercato.
 ALERT_THRESHOLD = 15.0
+
+# Referral automatizzato:
+# premio solo se il nuovo utente resta almeno 24h nel server e fa almeno 1 trade.
+REFERRAL_REWARD = 500
+REFERRAL_MIN_AGE_HOURS = 24
+INVITE_CACHE = {}
 
 COMPETITIONS = {
     "PL": "Premier League",
@@ -211,6 +218,37 @@ CREATE TABLE IF NOT EXISTS price_history (
 )
 """)
 
+c.execute("""
+CREATE TABLE IF NOT EXISTS user_stats (
+    user_id TEXT PRIMARY KEY,
+    xp INTEGER DEFAULT 0,
+    current_streak INTEGER DEFAULT 0,
+    best_streak INTEGER DEFAULT 0,
+    last_daily TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS wealth_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    timestamp TEXT,
+    net_worth REAL
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS referrals (
+    invited_user_id TEXT PRIMARY KEY,
+    inviter_user_id TEXT,
+    guild_id TEXT,
+    invite_code TEXT,
+    joined_at TEXT,
+    rewarded INTEGER DEFAULT 0,
+    rewarded_at TEXT
+)
+""")
+
 # =========================
 # DATABASE UPDATE
 # =========================
@@ -342,6 +380,594 @@ def market_color(yes_p):
     return 0xf59e0b
 
 
+def ensure_user_stats(user_id):
+    c.execute("SELECT user_id FROM user_stats WHERE user_id=?", (user_id,))
+    if not c.fetchone():
+        c.execute(
+            "INSERT INTO user_stats (user_id, xp, current_streak, best_streak, last_daily) VALUES (?, 0, 0, 0, NULL)",
+            (user_id,)
+        )
+        conn.commit()
+
+
+def get_user_stats(user_id):
+    ensure_user_stats(user_id)
+    c.execute("SELECT xp, current_streak, best_streak, last_daily FROM user_stats WHERE user_id=?", (user_id,))
+    return c.fetchone() or (0, 0, 0, None)
+
+
+def trader_level_from_xp(xp):
+    xp = int(xp or 0)
+    level = 1
+    remaining = xp
+    required = 500
+
+    while remaining >= required:
+        remaining -= required
+        level += 1
+        required = 500 + (level - 1) * 250
+
+    return level, remaining, required
+
+
+def award_xp(user_id, amount):
+    if amount <= 0:
+        return
+    ensure_user_stats(user_id)
+    c.execute("UPDATE user_stats SET xp = xp + ? WHERE user_id=?", (int(amount), user_id))
+    conn.commit()
+
+
+def get_server_level_from_roles(member):
+    """
+    Legge il livello server dai ruoli Discord assegnati da Maki.
+    Funziona con nomi tipo: Level 10, Lv 10, Livello 10, Rank 10.
+    """
+    best_level = 0
+    best_name = None
+
+    for role in member.roles:
+        name = role.name.strip()
+        lower = name.lower()
+
+        if not any(key in lower for key in ["level", "livello", "lv", "rank"]):
+            continue
+
+        digits = "".join(ch if ch.isdigit() else " " for ch in name).split()
+
+        for d in digits:
+            try:
+                lvl = int(d)
+            except Exception:
+                continue
+
+            if lvl > best_level:
+                best_level = lvl
+                best_name = name
+
+    if best_level <= 0:
+        return "N/D"
+
+    return f"{best_name}"
+
+
+def calculate_server_rank(user_id):
+    c.execute("SELECT user_id, balance FROM users")
+    users = c.fetchall()
+
+    ranking = []
+    for uid, bal in users:
+        _, open_value, _, _ = calculate_user_open_value(uid)
+        ranking.append((uid, bal + open_value))
+
+    ranking.sort(key=lambda x: x[1], reverse=True)
+
+    for idx, (uid, _) in enumerate(ranking, start=1):
+        if uid == user_id:
+            return idx
+
+    return None
+
+
+def record_wealth_snapshot(user_id):
+    balance = get_user(user_id)
+    _, open_value, _, _ = calculate_user_open_value(user_id)
+    net_worth = balance + open_value
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    c.execute("""
+        INSERT INTO wealth_history (user_id, timestamp, net_worth)
+        VALUES (?, ?, ?)
+    """, (user_id, now, net_worth))
+    conn.commit()
+
+
+
+# =========================
+# REFERRAL HELPERS
+# =========================
+async def cache_guild_invites(guild):
+    """Salva lo stato degli inviti di un server per capire chi ha invitato un nuovo membro."""
+    try:
+        invites = await guild.invites()
+    except Exception as e:
+        print(f"[REFERRAL] Impossibile leggere gli inviti per {guild.name}: {e}")
+        INVITE_CACHE[guild.id] = {}
+        return
+
+    INVITE_CACHE[guild.id] = {invite.code: invite.uses for invite in invites}
+
+
+async def cache_all_invites():
+    for guild in bot.guilds:
+        await cache_guild_invites(guild)
+
+
+def user_has_trade(user_id):
+    c.execute("""
+        SELECT COUNT(*)
+        FROM trades
+        WHERE user_id=?
+          AND amount > 0
+    """, (str(user_id),))
+
+    return (c.fetchone()[0] or 0) > 0
+
+
+async def referral_checker():
+    """Premia automaticamente i referral validi: 24h nel server + almeno 1 trade."""
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            c.execute("""
+                SELECT invited_user_id, inviter_user_id, guild_id, joined_at
+                FROM referrals
+                WHERE rewarded=0
+            """)
+            rows = c.fetchall()
+            now = datetime.now(timezone.utc)
+
+            for invited_id, inviter_id, guild_id, joined_at in rows:
+                try:
+                    joined = datetime.fromisoformat(joined_at)
+                    if joined.tzinfo is None:
+                        joined = joined.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+
+                if now - joined < timedelta(hours=REFERRAL_MIN_AGE_HOURS):
+                    continue
+
+                guild = bot.get_guild(int(guild_id))
+                if not guild:
+                    continue
+
+                member = guild.get_member(int(invited_id))
+                if member is None:
+                    # Il nuovo utente non è più nel server: niente premio.
+                    continue
+
+                if not user_has_trade(invited_id):
+                    # Anti-abuso: il nuovo utente deve aver fatto almeno un trade reale.
+                    continue
+
+                get_user(inviter_id)
+                c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (REFERRAL_REWARD, inviter_id))
+                c.execute("""
+                    UPDATE referrals
+                    SET rewarded=1,
+                        rewarded_at=?
+                    WHERE invited_user_id=?
+                """, (now.isoformat(), invited_id))
+                conn.commit()
+
+                award_xp(inviter_id, 100)
+                record_wealth_snapshot(inviter_id)
+
+                inviter = guild.get_member(int(inviter_id))
+                if inviter:
+                    try:
+                        await inviter.send(
+                            f"🎁 Referral valido! Hai ricevuto +{REFERRAL_REWARD} crediti perché {member.display_name} è rimasto nel server e ha fatto almeno un trade."
+                        )
+                    except Exception:
+                        pass
+
+                print(f"[REFERRAL PAID] {inviter_id} +{REFERRAL_REWARD} for {invited_id}")
+
+        except Exception as e:
+            print("REFERRAL ERR:", e)
+
+        await asyncio.sleep(600)
+
+
+def update_streaks_for_market(market_id, result):
+    c.execute("""
+        SELECT user_id,
+               SUM(CASE WHEN side=? THEN amount ELSE 0 END) AS win_amount,
+               SUM(CASE WHEN side!=? THEN amount ELSE 0 END) AS lose_amount
+        FROM trades
+        WHERE market_id=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+        GROUP BY user_id
+    """, (result, result, market_id))
+
+    rows = c.fetchall()
+
+    for user_id, win_amount, lose_amount in rows:
+        win_amount = win_amount or 0
+        lose_amount = lose_amount or 0
+        ensure_user_stats(user_id)
+
+        if win_amount > 0:
+            c.execute("""
+                UPDATE user_stats
+                SET current_streak = current_streak + 1,
+                    best_streak = MAX(best_streak, current_streak + 1)
+                WHERE user_id=?
+            """, (user_id,))
+            award_xp(user_id, 75)
+        elif lose_amount > 0:
+            c.execute("UPDATE user_stats SET current_streak=0 WHERE user_id=?", (user_id,))
+
+    conn.commit()
+
+
+def make_profile_dashboard_image(member, balance, net_worth, xp, trader_level, xp_current, xp_required, accuracy, streak, rank):
+    c.execute("""
+        SELECT timestamp, net_worth
+        FROM wealth_history
+        WHERE user_id=?
+        ORDER BY id DESC
+        LIMIT 12
+    """, (str(member.id),))
+    rows = list(reversed(c.fetchall()))
+
+    if not rows:
+        rows = [(datetime.utcnow().strftime("%H:%M"), net_worth)]
+
+    labels = []
+    values = []
+    for ts, value in rows:
+        labels.append(str(ts)[11:16] if len(str(ts)) >= 16 else str(ts))
+        values.append(float(value or 0))
+
+    fig = plt.figure(figsize=(10, 5), dpi=140)
+    fig.patch.set_facecolor("#0e1117")
+
+    ax_bg = fig.add_axes([0, 0, 1, 1])
+    ax_bg.axis("off")
+    ax_bg.set_facecolor("#0e1117")
+
+    # Header
+    ax_bg.text(0.05, 0.88, f"{member.display_name}", fontsize=24, fontweight="bold", color="white")
+    ax_bg.text(0.05, 0.80, "Prediction Market Dashboard", fontsize=11, color="#9ca3af")
+
+    rank_text = f"#{rank}" if rank else "N/D"
+    ax_bg.text(0.73, 0.88, f"Rank {rank_text}", fontsize=18, fontweight="bold", color="#facc15")
+
+    # Stat cards
+    stats = [
+        ("Saldo", f"{balance:.0f}"),
+        ("Patrimonio", f"{net_worth:.0f}"),
+        ("Livello trader", f"Lv {trader_level}"),
+        ("XP", f"{xp_current}/{xp_required}"),
+        ("Accuracy", f"{accuracy:.1f}%"),
+        ("Streak", f"{streak}"),
+    ]
+
+    x0 = 0.05
+    y0 = 0.62
+    w = 0.27
+    h = 0.12
+    gap = 0.035
+
+    for i, (label, value) in enumerate(stats):
+        col = i % 3
+        row = i // 3
+        x = x0 + col * (w + gap)
+        y = y0 - row * (h + 0.04)
+        rect = plt.Rectangle((x, y), w, h, transform=fig.transFigure, facecolor="#111827", edgecolor="#1f2937", linewidth=1.2)
+        fig.patches.append(rect)
+        ax_bg.text(x + 0.02, y + 0.073, label, fontsize=10, color="#9ca3af")
+        ax_bg.text(x + 0.02, y + 0.025, value, fontsize=17, fontweight="bold", color="white")
+
+    # Chart
+    ax = fig.add_axes([0.08, 0.10, 0.84, 0.28])
+    ax.set_facecolor("#0e1117")
+    ax.plot(range(len(values)), values, linewidth=2.5, color="#22c55e")
+    ax.fill_between(range(len(values)), values, min(values) if values else 0, alpha=0.12, color="#22c55e")
+    ax.grid(True, alpha=0.15)
+    ax.tick_params(colors="#9ca3af", labelsize=8)
+    ax.set_title("Andamento patrimonio", color="white", fontsize=12, fontweight="bold")
+
+    if len(labels) > 1:
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=25)
+    else:
+        ax.set_xticks([])
+
+    for spine in ax.spines.values():
+        spine.set_color("#1f2937")
+
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format="png", facecolor="#0e1117", bbox_inches="tight", pad_inches=0.1)
+    buffer.seek(0)
+    plt.close(fig)
+    return buffer
+
+
+
+
+# =========================
+# AI PREDICTION HELPERS
+# =========================
+def get_match_details(match_id):
+    """Recupera i dettagli completi di una partita da football-data.org."""
+    status_code, data = api_get(f"/matches/{match_id}")
+
+    if status_code != 200 or "id" not in data:
+        return None, status_code, data
+
+    return data, status_code, data
+
+
+def get_recent_team_matches(team_id, limit=5):
+    """Recupera le ultime partite concluse di una squadra.
+
+    Se il piano API non consente l'endpoint o non restituisce dati,
+    torna una lista vuota. Il comando !predict resta comunque funzionante.
+    """
+    params = {
+        "status": "FINISHED",
+        "limit": limit
+    }
+
+    status_code, data = api_get(f"/teams/{team_id}/matches", params)
+
+    if status_code != 200:
+        return []
+
+    matches = data.get("matches", [])
+
+    finished = [m for m in matches if m.get("status") == "FINISHED"]
+    finished.sort(key=lambda m: m.get("utcDate", ""), reverse=True)
+
+    return finished[:limit]
+
+
+def analyze_team_form(matches, team_id):
+    """Calcola forma, gol fatti/subiti e indicatori base."""
+    wins = draws = losses = 0
+    goals_for = 0
+    goals_against = 0
+    clean_sheets = 0
+    form = []
+
+    for m in matches:
+        home_id = m.get("homeTeam", {}).get("id")
+        away_id = m.get("awayTeam", {}).get("id")
+        score = m.get("score", {}).get("fullTime", {})
+        hg = score.get("home")
+        ag = score.get("away")
+
+        if hg is None or ag is None:
+            continue
+
+        if team_id == home_id:
+            gf, ga = hg, ag
+        elif team_id == away_id:
+            gf, ga = ag, hg
+        else:
+            continue
+
+        goals_for += gf
+        goals_against += ga
+
+        if ga == 0:
+            clean_sheets += 1
+
+        if gf > ga:
+            wins += 1
+            form.append("✅")
+        elif gf == ga:
+            draws += 1
+            form.append("➖")
+        else:
+            losses += 1
+            form.append("❌")
+
+    played = wins + draws + losses
+
+    if played == 0:
+        return {
+            "played": 0,
+            "wins": 0,
+            "draws": 0,
+            "losses": 0,
+            "goals_for": 0,
+            "goals_against": 0,
+            "avg_for": 0,
+            "avg_against": 0,
+            "clean_sheets": 0,
+            "form": "N/D",
+            "points": 0,
+            "power": 50.0
+        }
+
+    points = wins * 3 + draws
+    avg_for = goals_for / played
+    avg_against = goals_against / played
+
+    # Power rating semplice e spiegabile, 0-100.
+    power = 50
+    power += (wins - losses) * 7
+    power += (avg_for - avg_against) * 8
+    power += clean_sheets * 2
+    power = max(20, min(80, power))
+
+    return {
+        "played": played,
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "goals_for": goals_for,
+        "goals_against": goals_against,
+        "avg_for": avg_for,
+        "avg_against": avg_against,
+        "clean_sheets": clean_sheets,
+        "form": " ".join(form[:5]) if form else "N/D",
+        "points": points,
+        "power": power
+    }
+
+
+def calculate_ai_prediction(home_stats, away_stats):
+    """Genera probabilità Home/Draw/Away e indicatori di rischio.
+
+    L'algoritmo è volutamente trasparente: non pretende di essere infallibile,
+    ma costruisce una stima coerente sulla base dei dati disponibili.
+    """
+    home_power = home_stats["power"]
+    away_power = away_stats["power"]
+
+    data_quality = min(home_stats["played"], away_stats["played"])
+    power_diff = home_power - away_power
+
+    # Vantaggio casa leggero.
+    home_advantage = 5
+    adjusted_diff = power_diff + home_advantage
+
+    home_prob = 45 + adjusted_diff * 0.45
+    away_prob = 35 - adjusted_diff * 0.35
+
+    balance = abs(adjusted_diff)
+    draw_prob = 20
+    if balance < 6:
+        draw_prob += 6
+    elif balance > 18:
+        draw_prob -= 5
+
+    home_prob = max(18, min(78, home_prob))
+    away_prob = max(10, min(65, away_prob))
+    draw_prob = max(12, min(32, draw_prob))
+
+    total = home_prob + draw_prob + away_prob
+    home_prob = round(home_prob / total * 100, 1)
+    draw_prob = round(draw_prob / total * 100, 1)
+    away_prob = round(100 - home_prob - draw_prob, 1)
+
+    favorite_prob = max(home_prob, draw_prob, away_prob)
+
+    # Prediction score: qualità dei dati + chiarezza del vantaggio.
+    data_score = min(30, data_quality * 6)
+    clarity_score = min(45, abs(adjusted_diff) * 1.8)
+    confidence_score = int(max(35, min(95, 25 + data_score + clarity_score)))
+
+    if confidence_score >= 80:
+        stars = "★★★★★"
+    elif confidence_score >= 65:
+        stars = "★★★★☆"
+    elif confidence_score >= 50:
+        stars = "★★★☆☆"
+    elif confidence_score >= 40:
+        stars = "★★☆☆☆"
+    else:
+        stars = "★☆☆☆☆"
+
+    if favorite_prob >= 62 and confidence_score >= 70:
+        risk = "🟢 BASSO"
+        color = 0x22c55e
+    elif favorite_prob >= 52:
+        risk = "🟡 MEDIO"
+        color = 0xf59e0b
+    else:
+        risk = "🔴 ALTO"
+        color = 0xef4444
+
+    return {
+        "home_prob": home_prob,
+        "draw_prob": draw_prob,
+        "away_prob": away_prob,
+        "confidence_score": confidence_score,
+        "stars": stars,
+        "risk": risk,
+        "color": color,
+        "home_power": round(home_power, 1),
+        "away_power": round(away_power, 1),
+        "adjusted_diff": round(adjusted_diff, 1)
+    }
+
+
+def find_market_for_match(match_id):
+    match_key = f"MATCH_{match_id}"
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool, total_pool, active
+        FROM markets
+        WHERE match_key=?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (match_key,))
+
+    return c.fetchone()
+
+
+def build_prediction_comment(home_name, away_name, home_stats, away_stats, prediction, community=None):
+    home_prob = prediction["home_prob"]
+    away_prob = prediction["away_prob"]
+    draw_prob = prediction["draw_prob"]
+
+    if home_prob >= max(away_prob, draw_prob):
+        fav = home_name
+        fav_prob = home_prob
+    elif away_prob >= max(home_prob, draw_prob):
+        fav = away_name
+        fav_prob = away_prob
+    else:
+        fav = "il pareggio"
+        fav_prob = draw_prob
+
+    parts = []
+
+    if fav == home_name:
+        parts.append(f"L'algoritmo vede **{home_name}** leggermente o nettamente favorito, soprattutto per il vantaggio casa e il confronto di forma recente.")
+    elif fav == away_name:
+        parts.append(f"L'algoritmo vede **{away_name}** come possibile favorita, nonostante giochi fuori casa, per il rendimento recente superiore.")
+    else:
+        parts.append("La partita appare molto equilibrata: l'algoritmo assegna un peso rilevante allo scenario pareggio.")
+
+    if home_stats["played"] and away_stats["played"]:
+        if home_stats["avg_for"] > away_stats["avg_for"] + 0.4:
+            parts.append(f"{home_name} mostra una produzione offensiva migliore nelle ultime gare.")
+        elif away_stats["avg_for"] > home_stats["avg_for"] + 0.4:
+            parts.append(f"{away_name} arriva con una produzione offensiva più alta nelle ultime gare.")
+
+        if home_stats["avg_against"] < away_stats["avg_against"] - 0.3:
+            parts.append(f"La fase difensiva di {home_name} risulta più solida dai dati recenti.")
+        elif away_stats["avg_against"] < home_stats["avg_against"] - 0.3:
+            parts.append(f"La fase difensiva di {away_name} sembra più solida dai dati recenti.")
+    else:
+        parts.append("I dati storici disponibili tramite API sono limitati: la previsione va letta con prudenza.")
+
+    if community:
+        diff = home_prob - community["yes_p"]
+        if abs(diff) >= 8:
+            if diff > 0:
+                parts.append("La community è più prudente dell'AI sul lato YES: potrebbe esserci valore se si crede nella squadra di casa.")
+            else:
+                parts.append("La community è più ottimista dell'AI sul lato YES: attenzione a un possibile eccesso di entusiasmo.")
+
+    parts.append(f"Prediction score: **{prediction['confidence_score']}/100**. Probabilità principale stimata: **{fav_prob:.1f}%**.")
+
+    return " ".join(parts)
+
+
+def fmt_avg(value):
+    return f"{value:.2f}" if isinstance(value, (int, float)) else "N/D"
+
+
 # =========================
 # BASE COMMANDS
 # =========================
@@ -362,6 +988,99 @@ async def balance(ctx):
     embed.add_field(name="Crediti disponibili", value=f"{bal}", inline=False)
 
     await ctx.send(embed=embed)
+
+# =========================
+# DAILY REWARD
+# =========================
+@bot.command(aliases=["giornaliero"])
+async def daily(ctx):
+    user_id = str(ctx.author.id)
+    get_user(user_id)
+    ensure_user_stats(user_id)
+
+    xp, current_streak, best_streak, last_daily = get_user_stats(user_id)
+    now = datetime.now(timezone.utc)
+
+    if last_daily:
+        try:
+            last = datetime.fromisoformat(last_daily)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+        except Exception:
+            last = None
+
+        if last and now - last < timedelta(hours=24):
+            remaining = timedelta(hours=24) - (now - last)
+            hours = int(remaining.total_seconds() // 3600)
+            minutes = int((remaining.total_seconds() % 3600) // 60)
+            await ctx.send(f"⏳ Hai già riscattato il daily. Riprova tra {hours}h {minutes}m.")
+            return
+
+    reward = 100
+    xp_reward = 25
+    c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (reward, user_id))
+    c.execute("UPDATE user_stats SET xp = xp + ?, last_daily=? WHERE user_id=?", (xp_reward, now.isoformat(), user_id))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    balance = get_user(user_id)
+    xp, current_streak, best_streak, _ = get_user_stats(user_id)
+    trader_level, xp_current, xp_required = trader_level_from_xp(xp)
+
+    embed = discord.Embed(
+        title="🎁 Daily riscattato",
+        description=f"Hai ricevuto **+{reward} crediti** e **+{xp_reward} XP trader**.",
+        color=0x22c55e
+    )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="💰 Saldo aggiornato", value=str(balance), inline=True)
+    embed.add_field(name="💹 Livello trader", value=f"Lv {trader_level}", inline=True)
+    embed.add_field(name="📈 XP", value=f"{xp_current}/{xp_required}", inline=True)
+    embed.set_footer(text="Comando disponibile anche come !giornaliero")
+
+    await ctx.send(embed=embed)
+
+
+# =========================
+# REFERRAL STATUS
+# =========================
+@bot.command(aliases=["inviti", "referral"])
+async def referrals(ctx):
+    user_id = str(ctx.author.id)
+
+    c.execute("""
+        SELECT COUNT(*)
+        FROM referrals
+        WHERE inviter_user_id=?
+    """, (user_id,))
+    total = c.fetchone()[0] or 0
+
+    c.execute("""
+        SELECT COUNT(*)
+        FROM referrals
+        WHERE inviter_user_id=?
+          AND rewarded=1
+    """, (user_id,))
+    rewarded = c.fetchone()[0] or 0
+
+    pending = max(0, total - rewarded)
+
+    embed = discord.Embed(
+        title="🤝 Referral",
+        description=(
+            f"Invita un amico nel server: ricevi **+{REFERRAL_REWARD} crediti** quando resta almeno "
+            f"**{REFERRAL_MIN_AGE_HOURS}h** e fa almeno **1 trade**."
+        ),
+        color=0x22c55e
+    )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="✅ Premi riscossi", value=str(rewarded), inline=True)
+    embed.add_field(name="⏳ In attesa", value=str(pending), inline=True)
+    embed.add_field(name="👥 Inviti tracciati", value=str(total), inline=True)
+    embed.set_footer(text="Anti-abuso: niente premio per auto-inviti, bot o utenti che lasciano subito il server.")
+
+    await ctx.send(embed=embed)
+
 
 # =========================
 # API TEST COMMANDS
@@ -443,6 +1162,145 @@ async def testmatch(ctx, match_id: int):
 """
 
     await ctx.send(msg)
+
+
+
+
+# =========================
+# AI MATCH PREDICTION
+# =========================
+@bot.command(aliases=["previsione", "pronostico"])
+async def predict(ctx, match_id: int):
+    match, status_code, raw_data = get_match_details(match_id)
+
+    if not match:
+        embed = discord.Embed(
+            title="❌ Match non trovato",
+            description=f"Non riesco a recuperare il match `{match_id}` da football-data.org.",
+            color=0xef4444
+        )
+        embed.add_field(name="Status API", value=str(status_code), inline=True)
+        embed.add_field(name="Suggerimento", value="Prova prima `!testmatch ID` oppure recupera l'ID con `!fixtures`.", inline=False)
+        await ctx.send(embed=embed)
+        return
+
+    home_team = match.get("homeTeam", {})
+    away_team = match.get("awayTeam", {})
+    competition = match.get("competition", {})
+    score = match.get("score", {})
+
+    home_id = home_team.get("id")
+    away_id = away_team.get("id")
+    home_name = home_team.get("name", "Home")
+    away_name = away_team.get("name", "Away")
+    competition_name = competition.get("name", "Competizione")
+    utc_date = match.get("utcDate", "N/D")
+    status = match.get("status", "N/D")
+
+    if not home_id or not away_id:
+        await ctx.send("❌ Dati squadre insufficienti per generare la previsione.")
+        return
+
+    home_recent = get_recent_team_matches(home_id, 5)
+    away_recent = get_recent_team_matches(away_id, 5)
+
+    home_stats = analyze_team_form(home_recent, home_id)
+    away_stats = analyze_team_form(away_recent, away_id)
+    prediction = calculate_ai_prediction(home_stats, away_stats)
+
+    market = find_market_for_match(match_id)
+    community = None
+
+    if market:
+        market_id, question, yes_pool, no_pool, total_pool, active = market
+        yes_p, no_p = market_probabilities(yes_pool, no_pool)
+        community = {
+            "market_id": market_id,
+            "question": question,
+            "yes_p": yes_p,
+            "no_p": no_p,
+            "total_pool": total_pool,
+            "active": active
+        }
+
+    comment = build_prediction_comment(home_name, away_name, home_stats, away_stats, prediction, community)
+
+    embed = discord.Embed(
+        title="🤖 AI Match Analysis",
+        description=f"**{home_name}** vs **{away_name}**",
+        color=prediction["color"]
+    )
+
+    embed.add_field(name="🏆 Competizione", value=competition_name, inline=True)
+    embed.add_field(name="📡 Stato", value=status, inline=True)
+    embed.add_field(name="🆔 Match ID", value=str(match_id), inline=True)
+    embed.add_field(name="📅 Data UTC", value=str(utc_date).replace("T", " ").replace("Z", ""), inline=False)
+
+    embed.add_field(
+        name="📊 Probabilità AI",
+        value=(
+            f"🏠 **{home_name}**: **{prediction['home_prob']}%** `{progress_bar(prediction['home_prob'], 10)}`\n"
+            f"🤝 **Pareggio**: **{prediction['draw_prob']}%** `{progress_bar(prediction['draw_prob'], 10)}`\n"
+            f"✈️ **{away_name}**: **{prediction['away_prob']}%** `{progress_bar(prediction['away_prob'], 10)}`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(name="⭐ Confidenza", value=f"{prediction['stars']}\n{prediction['confidence_score']}/100", inline=True)
+    embed.add_field(name="📉 Rischio", value=prediction["risk"], inline=True)
+    embed.add_field(name="🧮 Power rating", value=f"{home_name}: {prediction['home_power']}\n{away_name}: {prediction['away_power']}", inline=True)
+
+    embed.add_field(
+        name=f"📈 Forma {home_name}",
+        value=(
+            f"{home_stats['form']}\n"
+            f"V/P/S: **{home_stats['wins']}/{home_stats['draws']}/{home_stats['losses']}**\n"
+            f"⚽ GF: **{fmt_avg(home_stats['avg_for'])}** | 🛡 GA: **{fmt_avg(home_stats['avg_against'])}**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name=f"📈 Forma {away_name}",
+        value=(
+            f"{away_stats['form']}\n"
+            f"V/P/S: **{away_stats['wins']}/{away_stats['draws']}/{away_stats['losses']}**\n"
+            f"⚽ GF: **{fmt_avg(away_stats['avg_for'])}** | 🛡 GA: **{fmt_avg(away_stats['avg_against'])}**"
+        ),
+        inline=True
+    )
+
+    if community:
+        diff = prediction["home_prob"] - community["yes_p"]
+        if diff > 0:
+            verdict = f"AI più favorevole al YES di **+{diff:.1f}%**"
+        elif diff < 0:
+            verdict = f"Community più favorevole al YES di **+{abs(diff):.1f}%**"
+        else:
+            verdict = "AI e community sono allineate."
+
+        embed.add_field(
+            name="📊 AI vs Community",
+            value=(
+                f"Mercato: **#{community['market_id']}**\n"
+                f"Community YES: **{community['yes_p']}%**\n"
+                f"Community NO: **{community['no_p']}%**\n"
+                f"Volume: **{community['total_pool']} crediti**\n"
+                f"{verdict}"
+            ),
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="📊 AI vs Community",
+            value="Nessun mercato collegato a questo Match ID. Crea un mercato con `!creatematch` per confrontare AI e community.",
+            inline=False
+        )
+
+    embed.add_field(name="🧠 Analisi", value=comment[:1000], inline=False)
+    embed.set_footer(text="Stima probabilistica: non garantisce il risultato finale. Usa !predict come supporto, non come certezza.")
+
+    await ctx.send(embed=embed)
 
 
 # =========================
@@ -849,27 +1707,53 @@ async def profile(ctx):
     c.execute("SELECT COUNT(*) FROM trades WHERE user_id=?", (user_id,))
     total_trades = c.fetchone()[0] or 0
 
+    xp, current_streak, best_streak, _ = get_user_stats(user_id)
+    trader_level, xp_current, xp_required = trader_level_from_xp(xp)
+    server_level = get_server_level_from_roles(ctx.author)
+    rank = calculate_server_rank(user_id)
+    rank_text = f"#{rank}" if rank else "N/D"
+
     color = 0x22c55e if open_profit >= 0 else 0xef4444
+
+    dashboard = make_profile_dashboard_image(
+        ctx.author,
+        balance,
+        net_worth,
+        xp,
+        trader_level,
+        xp_current,
+        xp_required,
+        accuracy,
+        current_streak,
+        rank
+    )
+
+    file = discord.File(dashboard, filename="profile_dashboard.png")
 
     embed = discord.Embed(
         title=f"👤 Profilo di {ctx.author.display_name}",
-        description="Statistiche personali del trader",
+        description="Dashboard personale del trader",
         color=color
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.add_field(name="⭐ Livello server", value=server_level, inline=True)
+    embed.add_field(name="💹 Livello trader", value=f"Lv {trader_level}", inline=True)
+    embed.add_field(name="📈 XP trader", value=f"{xp_current}/{xp_required}", inline=True)
     embed.add_field(name="💰 Saldo", value=f"{balance}", inline=True)
     embed.add_field(name="💼 Patrimonio stimato", value=f"{net_worth:.0f}", inline=True)
-    embed.add_field(name="🟢 Posizioni aperte", value=str(open_positions), inline=True)
-    embed.add_field(name="💸 Investito aperto", value=f"{total_invested:.0f}", inline=True)
-    embed.add_field(name="📈 Valore aperto", value=f"{total_value:.0f}", inline=True)
-    embed.add_field(name="📊 Profitto aperto", value=f"{open_profit:+.0f} ({roi:+.1f}%)", inline=True)
+    embed.add_field(name="🏆 Rank", value=rank_text, inline=True)
+    embed.add_field(name="🔥 Streak attuale", value=str(current_streak), inline=True)
+    embed.add_field(name="🥇 Miglior streak", value=str(best_streak), inline=True)
+    embed.add_field(name="🎯 Accuracy", value=f"{accuracy:.1f}%", inline=True)
     embed.add_field(name="🏆 Mercati vinti", value=str(won_markets), inline=True)
     embed.add_field(name="❌ Mercati persi", value=str(lost_markets), inline=True)
-    embed.add_field(name="🎯 Accuracy", value=f"{accuracy:.1f}%", inline=True)
     embed.add_field(name="📜 Trade totali", value=str(total_trades), inline=True)
+    embed.add_field(name="📊 Profitto aperto", value=f"{open_profit:+.0f} ({roi:+.1f}%)", inline=True)
+    embed.add_field(name="🟢 Posizioni aperte", value=str(open_positions), inline=True)
+    embed.set_image(url="attachment://profile_dashboard.png")
     embed.set_footer(text="Comando disponibile anche come !profilo")
 
-    await ctx.send(embed=embed)
+    await ctx.send(embed=embed, file=file)
 
 # =========================
 # LEADERBOARD
@@ -1040,6 +1924,8 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     """, (user_id, market_id, side, amount, trade_price))
 
     save_price(market_id, yes_p)
+    award_xp(user_id, max(5, amount // 20))
+    record_wealth_snapshot(user_id)
     conn.commit()
 
     embed = discord.Embed(
@@ -1176,6 +2062,8 @@ async def sell(ctx, market_id: int, percent: str, side: str = None):
     new_yes, new_no = c.fetchone()
     new_yes_p, new_no_p = market_probabilities(new_yes, new_no)
     save_price(market_id, new_yes_p)
+    award_xp(user_id, max(3, proceeds // 25))
+    record_wealth_snapshot(user_id)
 
     conn.commit()
     bal = get_user(user_id)
@@ -1321,6 +2209,8 @@ def payout_market(market_id, result):
             "UPDATE users SET balance = balance + ? WHERE user_id=?",
             (payout, u)
         )
+        award_xp(u, max(10, payout // 20))
+        record_wealth_snapshot(u)
 
     c.execute("""
         UPDATE trades
@@ -1432,6 +2322,7 @@ async def resolve():
 
                 conn.commit()
 
+                update_streaks_for_market(mid, final)
                 total_paid = payout_market(mid, final)
 
                 score = "N/D"
@@ -1467,13 +2358,74 @@ async def resolve():
         await asyncio.sleep(120)
 
 
+
+# =========================
+# REFERRAL EVENTS
+# =========================
+@bot.event
+async def on_member_join(member):
+    # Ignora i bot e gli auto-inviti.
+    if member.bot:
+        return
+
+    guild = member.guild
+    before = INVITE_CACHE.get(guild.id, {})
+
+    try:
+        current_invites = await guild.invites()
+    except Exception as e:
+        print(f"[REFERRAL] Impossibile leggere inviti su join: {e}")
+        await cache_guild_invites(guild)
+        return
+
+    used_invite = None
+    for invite in current_invites:
+        old_uses = before.get(invite.code, 0)
+        if invite.uses > old_uses:
+            used_invite = invite
+            break
+
+    INVITE_CACHE[guild.id] = {invite.code: invite.uses for invite in current_invites}
+
+    if not used_invite or not used_invite.inviter:
+        return
+
+    inviter = used_invite.inviter
+
+    if inviter.bot:
+        return
+
+    if inviter.id == member.id:
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    c.execute("""
+        INSERT OR IGNORE INTO referrals (
+            invited_user_id,
+            inviter_user_id,
+            guild_id,
+            invite_code,
+            joined_at,
+            rewarded,
+            rewarded_at
+        )
+        VALUES (?, ?, ?, ?, ?, 0, NULL)
+    """, (str(member.id), str(inviter.id), str(guild.id), used_invite.code, now))
+    conn.commit()
+
+    print(f"[REFERRAL TRACKED] {inviter.id} invited {member.id} via {used_invite.code}")
+
+
 # =========================
 # READY
 # =========================
 @bot.event
 async def on_ready():
     print(f"Bot online {bot.user}")
+    await cache_all_invites()
     bot.loop.create_task(resolve())
+    bot.loop.create_task(referral_checker())
 
 
 # =========================
