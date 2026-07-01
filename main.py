@@ -13,7 +13,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================
-# DATABASE SQLITE
+# DATABASE
 # =========================
 conn = sqlite3.connect("bot.db")
 c = conn.cursor()
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# MARKETS
+# MARKETS (AUTO READY)
 c.execute("""
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS markets (
     yes_price REAL,
     no_price REAL,
     total_pool INTEGER,
-    active INTEGER
+    active INTEGER,
+    match_key TEXT,
+    resolved INTEGER DEFAULT 0
 )
 """)
 
@@ -58,7 +60,7 @@ def get_user(user_id):
     return result[0]
 
 # =========================
-# BASE COMMANDS
+# BASIC COMMANDS
 # =========================
 
 @bot.command()
@@ -71,20 +73,21 @@ async def balance(ctx):
     await ctx.send(f"💰 Il tuo saldo è: {bal} crediti")
 
 # =========================
-# CREATE MARKET
+# CREATE MARKET (AUTO READY)
 # =========================
 
 @bot.command()
-async def create(ctx, *, question):
+async def create(ctx, match_key: str, *, question):
     c.execute(
-        "INSERT INTO markets (question, yes_price, no_price, total_pool, active) VALUES (?, ?, ?, ?, ?)",
-        (question, 50.0, 50.0, 0, 1)
+        "INSERT INTO markets (question, yes_price, no_price, total_pool, active, match_key, resolved) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (question, 50.0, 50.0, 0, 1, match_key, 0)
     )
     conn.commit()
 
     await ctx.send(
-        f"📊 Mercato creato:\n"
-        f"**{question}**\n"
+        f"📊 Mercato creato!\n"
+        f"❓ {question}\n"
+        f"🆔 Match ID: {match_key}\n"
         f"YES: 50% | NO: 50%"
     )
 
@@ -116,11 +119,11 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         await ctx.send("❌ Non hai abbastanza crediti")
         return
 
-    # aggiorna saldo
+    # saldo utente
     new_bal = bal - amount
     c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_bal, user_id))
 
-    # aggiorna mercato
+    # update mercato
     total_pool += amount
 
     if side == "yes":
@@ -142,13 +145,13 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     conn.commit()
 
     await ctx.send(
-        f"📈 Acquisto effettuato!\n"
-        f"Mercato {market_id} | {side.upper()} +{amount}\n"
+        f"📈 Acquisto OK!\n"
+        f"Market {market_id} | {side.upper()} +{amount}\n"
         f"YES: {yes_price:.1f}% | NO: {no_price:.1f}%"
     )
 
 # =========================
-# LIST MARKET
+# MARKETS LIST
 # =========================
 
 @bot.command()
@@ -174,7 +177,7 @@ async def markets(ctx):
     await ctx.send(msg)
 
 # =========================
-# SINGLE MARKET VIEW
+# SINGLE MARKET
 # =========================
 
 @bot.command()
