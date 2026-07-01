@@ -11,7 +11,7 @@ plt.rcParams["font.family"] = "DejaVu Sans"
 plt.rcParams["axes.titleweight"] = "bold"
 plt.rcParams["axes.labelsize"] = 11
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from discord.ext import commands
 
 
@@ -36,16 +36,50 @@ BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
 
 
-def get_match_result(match_id):
-    url = f"{BASE_URL}/matches/{match_id}"
+COMPETITIONS = {
+    "PL": "Premier League",
+    "SA": "Serie A",
+    "PD": "La Liga",
+    "BL1": "Bundesliga",
+    "FL1": "Ligue 1",
+    "CL": "Champions League",
+    "WC": "World Cup",
+    "EC": "European Championship"
+}
+
+
+async def send_long(ctx, msg):
+    if len(msg) <= 1900:
+        await ctx.send(msg)
+        return
+
+    chunks = [msg[i:i+1900] for i in range(0, len(msg), 1900)]
+
+    for chunk in chunks:
+        await ctx.send(chunk)
+
+
+def api_get(path, params=None):
+    url = f"{BASE_URL}{path}"
 
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        data = r.json()
-    except Exception:
-        return None
+        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
 
-    if r.status_code != 200:
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+
+        return r.status_code, data
+
+    except Exception as e:
+        return None, {"error": str(e)}
+
+
+def get_match_result(match_id):
+    status_code, data = api_get(f"/matches/{match_id}")
+
+    if status_code != 200:
         return None
 
     if "id" not in data:
@@ -194,19 +228,12 @@ async def checkapi(ctx):
         await ctx.send("❌ FOOTBALL_DATA_TOKEN non trovata nelle variabili ambiente")
         return
 
-    url = f"{BASE_URL}/matches"
-
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        data = r.json()
-    except Exception as e:
-        await ctx.send(f"❌ Errore richiesta API: {e}")
-        return
+    status_code, data = api_get("/competitions")
 
     await ctx.send(
 f"""🧪 TEST API FOOTBALL-DATA
 
-📡 Status HTTP: {r.status_code}
+📡 Status HTTP: {status_code}
 🔑 Token caricato: Sì
 
 📦 Messaggio:
@@ -216,24 +243,36 @@ f"""🧪 TEST API FOOTBALL-DATA
 
 
 @bot.command()
+async def competitions(ctx):
+
+    msg = "🏆 COMPETIZIONI RAPIDE\n\n"
+
+    for code, name in COMPETITIONS.items():
+        msg += f"🆔 {code} | {name}\n"
+
+    msg += """
+Esempi:
+!fixtures SA 7
+!fixtures PL 7
+!fixtures CL 14
+!fixtures WC 7
+"""
+
+    await ctx.send(msg)
+
+
+@bot.command()
 async def testmatch(ctx, match_id: int):
 
-    url = f"{BASE_URL}/matches/{match_id}"
-
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        data = r.json()
-    except Exception as e:
-        await ctx.send(f"❌ Errore richiesta API: {e}")
-        return
+    status_code, data = api_get(f"/matches/{match_id}")
 
     msg = f"""🧪 TEST MATCH
 
 🆔 Match ID: {match_id}
-📡 Status HTTP: {r.status_code}
+📡 Status HTTP: {status_code}
 """
 
-    if r.status_code != 200:
+    if status_code != 200:
         msg += f"""
 ❌ Errore API:
 {data}
@@ -262,6 +301,117 @@ async def testmatch(ctx, match_id: int):
 """
 
     await ctx.send(msg)
+
+
+# =========================
+# FIND MATCHES
+# =========================
+@bot.command()
+async def today(ctx):
+
+    today_date = datetime.now(timezone.utc).date().isoformat()
+
+    status_code, data = api_get(
+        "/matches",
+        {
+            "dateFrom": today_date,
+            "dateTo": today_date
+        }
+    )
+
+    if status_code != 200:
+        await ctx.send(f"❌ Errore API:\n{data}")
+        return
+
+    matches = data.get("matches", [])
+
+    if not matches:
+        await ctx.send("📭 Nessuna partita trovata oggi da football-data.org")
+        return
+
+    msg = "📅 PARTITE DI OGGI\n\n"
+
+    for m in matches[:15]:
+        mid = m["id"]
+        home = m["homeTeam"]["name"]
+        away = m["awayTeam"]["name"]
+        status = m["status"]
+        comp = m["competition"]["name"]
+
+        msg += f"""🆔 Match ID: {mid}
+🏆 {comp}
+🏟️ {home} vs {away}
+📡 Stato: {status}
+
+────────────────
+"""
+
+    await send_long(ctx, msg)
+
+
+@bot.command()
+async def fixtures(ctx, competition: str = "SA", days: int = 7):
+
+    competition = competition.upper()
+
+    if competition not in COMPETITIONS:
+        await ctx.send(
+f"""❌ Competizione non riconosciuta.
+
+Usa:
+!competitions
+
+Esempio:
+!fixtures SA 7
+"""
+        )
+        return
+
+    if days < 1:
+        days = 1
+
+    if days > 30:
+        days = 30
+
+    date_from = datetime.now(timezone.utc).date()
+    date_to = date_from + timedelta(days=days)
+
+    status_code, data = api_get(
+        f"/competitions/{competition}/matches",
+        {
+            "dateFrom": date_from.isoformat(),
+            "dateTo": date_to.isoformat()
+        }
+    )
+
+    if status_code != 200:
+        await ctx.send(f"❌ Errore API:\n{data}")
+        return
+
+    matches = data.get("matches", [])
+
+    if not matches:
+        await ctx.send(f"📭 Nessuna partita trovata per {competition} nei prossimi {days} giorni")
+        return
+
+    msg = f"📅 PARTITE {COMPETITIONS[competition]} | prossimi {days} giorni\n\n"
+
+    for m in matches[:20]:
+        mid = m["id"]
+        home = m["homeTeam"]["name"]
+        away = m["awayTeam"]["name"]
+        status = m["status"]
+        utc_date = m.get("utcDate", "N/D")
+
+        msg += f"""🆔 Match ID: {mid}
+🏟️ {home} vs {away}
+📡 Stato: {status}
+🕒 UTC: {utc_date}
+
+────────────────
+"""
+
+    await send_long(ctx, msg)
 
 
 # =========================
