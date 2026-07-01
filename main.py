@@ -259,28 +259,35 @@ async def chart(ctx, market_id: int):
         SELECT timestamp, yes_price
         FROM price_history
         WHERE market_id=?
-        ORDER BY id ASC
-        LIMIT 50
+        ORDER BY id DESC
+        LIMIT 30
     """, (market_id,))
 
-    data = c.fetchall()
+    data = list(reversed(c.fetchall()))
 
     if not data:
         await ctx.send("❌ Nessun dato storico")
         return
 
-    times = [t[0] for t in data]
-    prices = [p[1] for p in data]
+    times = [d[0] for d in data]
+    prices = [d[1] for d in data]
 
-    plt.figure()
-    plt.plot(times, prices, marker="o")
+    plt.figure(figsize=(8,4))
 
-    plt.title("📊 YES Price Trend")
+    plt.plot(prices, linewidth=2)
+
+    plt.title("📊 YES Price Trend", fontsize=14)
     plt.xlabel("Time")
     plt.ylabel("YES %")
-    plt.xticks(rotation=45)
+
+    plt.grid(True, alpha=0.3)
+
+    plt.xticks(range(0, len(times), max(1, len(times)//5)),
+               [times[i] for i in range(0, len(times), max(1, len(times)//5))],
+               rotation=45)
 
     buffer = io.BytesIO()
+    plt.tight_layout()
     plt.savefig(buffer, format="png")
     buffer.seek(0)
 
