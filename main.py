@@ -29,51 +29,57 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================
-# API FOOTBALL
+# FOOTBALL-DATA.ORG
 # =========================
-API_KEY = os.environ.get("FOOTBALL_API_KEY")
-HEADERS = {"x-apisports-key": API_KEY}
+FOOTBALL_DATA_TOKEN = os.environ.get("FOOTBALL_DATA_TOKEN")
+BASE_URL = "https://api.football-data.org/v4"
+HEADERS = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
 
 
-def get_fixture_result(fixture_id):
-    url = "https://v3.football.api-sports.io/fixtures"
-    params = {"id": fixture_id}
+def get_match_result(match_id):
+    url = f"{BASE_URL}/matches/{match_id}"
 
     try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        r = requests.get(url, headers=HEADERS, timeout=10)
         data = r.json()
-    except:
+    except Exception:
         return None
 
-    if not data.get("response"):
+    if r.status_code != 200:
         return None
 
-    match = data["response"][0]
+    if "id" not in data:
+        return None
 
-    status = match["fixture"]["status"]["short"]
+    status = data.get("status")
+    home = data["homeTeam"]["name"]
+    away = data["awayTeam"]["name"]
 
-    home = match["teams"]["home"]["name"]
-    away = match["teams"]["away"]["name"]
+    score = data.get("score", {})
+    full_time = score.get("fullTime", {})
 
-    gh = match["goals"]["home"]
-    ga = match["goals"]["away"]
+    gh = full_time.get("home")
+    ga = full_time.get("away")
 
-    if status != "FT":
+    winner = score.get("winner")
+
+    if status != "FINISHED":
         return {
             "finished": False,
             "status": status,
             "home": home,
             "away": away,
             "home_goals": gh,
-            "away_goals": ga
+            "away_goals": ga,
+            "winner": None
         }
 
-    if gh > ga:
-        winner = "HOME"
-    elif ga > gh:
-        winner = "AWAY"
+    if winner == "HOME_TEAM":
+        final_winner = "HOME"
+    elif winner == "AWAY_TEAM":
+        final_winner = "AWAY"
     else:
-        winner = "DRAW"
+        final_winner = "DRAW"
 
     return {
         "finished": True,
@@ -82,7 +88,7 @@ def get_fixture_result(fixture_id):
         "away": away,
         "home_goals": gh,
         "away_goals": ga,
-        "winner": winner
+        "winner": final_winner
     }
 
 
@@ -165,7 +171,7 @@ def save_price(market_id, yes_price):
 
 
 # =========================
-# COMMANDS BASE
+# BASE COMMANDS
 # =========================
 @bot.command()
 async def ping(ctx):
@@ -184,73 +190,95 @@ async def balance(ctx):
 @bot.command()
 async def checkapi(ctx):
 
-    if not API_KEY:
-        await ctx.send("❌ FOOTBALL_API_KEY non trovata nelle variabili ambiente")
+    if not FOOTBALL_DATA_TOKEN:
+        await ctx.send("❌ FOOTBALL_DATA_TOKEN non trovata nelle variabili ambiente")
         return
 
-    await ctx.send("✅ FOOTBALL_API_KEY caricata correttamente")
-
-
-@bot.command()
-async def testfixture(ctx, fixture_id: int):
-
-    url = "https://v3.football.api-sports.io/fixtures"
-    params = {"id": fixture_id}
+    url = f"{BASE_URL}/matches"
 
     try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        r = requests.get(url, headers=HEADERS, timeout=10)
         data = r.json()
     except Exception as e:
         await ctx.send(f"❌ Errore richiesta API: {e}")
         return
 
-    errors = data.get("errors")
-    response = data.get("response", [])
+    await ctx.send(
+f"""🧪 TEST API FOOTBALL-DATA
 
-    msg = f"""🧪 TEST FIXTURE
-
-🆔 Fixture ID: {fixture_id}
 📡 Status HTTP: {r.status_code}
+🔑 Token caricato: Sì
 
-📦 Results: {data.get("results")}
-💬 Errors: {errors}
-📊 Response trovate: {len(response)}
+📦 Messaggio:
+{data.get("message", "API raggiunta correttamente")}
+"""
+    )
+
+
+@bot.command()
+async def testmatch(ctx, match_id: int):
+
+    url = f"{BASE_URL}/matches/{match_id}"
+
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        data = r.json()
+    except Exception as e:
+        await ctx.send(f"❌ Errore richiesta API: {e}")
+        return
+
+    msg = f"""🧪 TEST MATCH
+
+🆔 Match ID: {match_id}
+📡 Status HTTP: {r.status_code}
 """
 
-    if response:
-        match = response[0]
-        home = match["teams"]["home"]["name"]
-        away = match["teams"]["away"]["name"]
-        status = match["fixture"]["status"]["short"]
-        gh = match["goals"]["home"]
-        ga = match["goals"]["away"]
-
+    if r.status_code != 200:
         msg += f"""
+❌ Errore API:
+{data}
+"""
+        await ctx.send(msg)
+        return
+
+    home = data["homeTeam"]["name"]
+    away = data["awayTeam"]["name"]
+    status = data["status"]
+
+    score = data.get("score", {})
+    full_time = score.get("fullTime", {})
+
+    gh = full_time.get("home")
+    ga = full_time.get("away")
+    winner = score.get("winner")
+
+    msg += f"""
 🏟️ Partita:
 {home} vs {away}
 
-📡 Stato API: {status}
+📡 Stato: {status}
 ⚽ Risultato: {gh}-{ga}
+🏆 Winner API: {winner}
 """
 
     await ctx.send(msg)
 
 
 # =========================
-# CREATE MARKET FROM FIXTURE API
+# CREATE MARKET FROM FOOTBALL-DATA MATCH
 # =========================
 @bot.command()
-async def createfixture(ctx, fixture_id: int, *, question):
+async def creatematch(ctx, match_id: int, *, question):
 
-    res = get_fixture_result(fixture_id)
+    res = get_match_result(match_id)
 
     if not res:
         await ctx.send(
-f"""❌ Fixture non trovata nell'API
+f"""❌ Match non trovato nell'API
 
 Prova prima:
 !checkapi
-!testfixture {fixture_id}
+!testmatch {match_id}
 """
         )
         return
@@ -265,7 +293,7 @@ Prova prima:
 
     c.execute("""
         INSERT INTO markets VALUES (NULL, ?, 0, 0, 0, 1, ?, 0, NULL)
-    """, (question, f"FIXTURE_{fixture_id}"))
+    """, (question, f"MATCH_{match_id}"))
 
     market_id = c.lastrowid
     conn.commit()
@@ -274,7 +302,7 @@ Prova prima:
 f"""📊 Mercato creato!
 
 🆔 ID Mercato: {market_id}
-🆔 Fixture API: {fixture_id}
+🆔 Match API: {match_id}
 
 🏟️ Partita:
 {home} vs {away}
@@ -348,21 +376,21 @@ async def market(ctx, market_id: int):
     yes_p = 50 if total == 0 else round((yes / total) * 100, 1)
     no_p = round(100 - yes_p, 1)
 
-    fixture_text = ""
+    match_text = ""
 
-    if match_key and match_key.startswith("FIXTURE_"):
-        fixture_id = match_key.replace("FIXTURE_", "")
-        res = get_fixture_result(fixture_id)
+    if match_key and match_key.startswith("MATCH_"):
+        match_id = match_key.replace("MATCH_", "")
+        res = get_match_result(match_id)
 
         if res:
-            fixture_text = f"""
+            match_text = f"""
 🏟️ Partita:
 {res["home"]} vs {res["away"]}
 
 📡 Stato API: {res["status"]}
 """
             if res["home_goals"] is not None and res["away_goals"] is not None:
-                fixture_text += f"⚽ Risultato live/finale: {res['home_goals']}-{res['away_goals']}\n"
+                match_text += f"⚽ Risultato live/finale: {res['home_goals']}-{res['away_goals']}\n"
 
     if active == 1:
         status = "ATTIVO"
@@ -375,7 +403,7 @@ async def market(ctx, market_id: int):
 f"""📊 MERCATO #{market_id}
 
 ❓ {q}
-{fixture_text}
+{match_text}
 🟢 YES: {yes_p}%
 🔴 NO: {no_p}%
 
@@ -462,7 +490,7 @@ f"""📈 Acquisto effettuato!
 
 
 # =========================
-# CHART (REAL IMAGE)
+# CHART
 # =========================
 @bot.command()
 async def chart(ctx, market_id: int):
@@ -585,15 +613,15 @@ async def resolve():
 
             for mid, mk in markets:
 
-                if not mk or not mk.startswith("FIXTURE_"):
+                if not mk or not mk.startswith("MATCH_"):
                     continue
 
                 try:
-                    fixture_id = int(mk.replace("FIXTURE_", ""))
+                    match_id = int(mk.replace("MATCH_", ""))
                 except:
                     continue
 
-                res = get_fixture_result(fixture_id)
+                res = get_match_result(match_id)
 
                 if not res:
                     continue
