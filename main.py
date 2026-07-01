@@ -30,9 +30,7 @@ HEADERS = {
 def get_match_result(team1, team2):
     url = "https://v3.football.api-sports.io/fixtures"
 
-    params = {
-        "search": f"{team1} {team2}"
-    }
+    params = {"search": f"{team1} {team2}"}
 
     try:
         r = requests.get(url, headers=HEADERS, params=params)
@@ -69,7 +67,6 @@ def get_match_result(team1, team2):
 conn = sqlite3.connect("bot.db")
 c = conn.cursor()
 
-# USERS
 c.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -77,7 +74,6 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# MARKETS
 c.execute("""
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +88,6 @@ CREATE TABLE IF NOT EXISTS markets (
 )
 """)
 
-# TRADES
 c.execute("""
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,7 +125,7 @@ async def ping(ctx):
 @bot.command()
 async def balance(ctx):
     bal = get_user(str(ctx.author.id))
-    await ctx.send(f"💰 {bal} crediti")
+    await ctx.send(f"💰 {bal}")
 
 @bot.command()
 async def checkapi(ctx):
@@ -156,8 +151,7 @@ async def create(ctx, league: str, match_key: str, *, question):
     full_match_key = f"{league}_{match_key}"
 
     c.execute("""
-        INSERT INTO markets (question, yes_price, no_price, total_pool, active, match_key, resolved, result)
-        VALUES (?, 50, 50, 0, 1, ?, 0, NULL)
+        INSERT INTO markets VALUES (NULL, ?, 50, 50, 0, 1, ?, 0, NULL)
     """, (question, full_match_key))
 
     conn.commit()
@@ -165,7 +159,7 @@ async def create(ctx, league: str, match_key: str, *, question):
     await ctx.send(f"📊 Mercato creato {full_match_key}")
 
 # =========================
-# BUY
+# BUY (FIX ANTI-BUG)
 # =========================
 
 @bot.command()
@@ -173,13 +167,22 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     user_id = str(ctx.author.id)
     side = side.upper()
 
-    bal = get_user(user_id)
+    # check mercato attivo
+    c.execute("SELECT active FROM markets WHERE id=?", (market_id,))
+    market = c.fetchone()
 
-    if amount > bal:
-        await ctx.send("❌ fondi insufficienti")
+    if not market or market[0] == 0:
+        await ctx.send("❌ Mercato chiuso")
         return
 
-    c.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, user_id))
+    bal = get_user(user_id)
+
+    if bal < amount:
+        await ctx.send("❌ Fondi insufficienti")
+        return
+
+    # update balance sicuro
+    c.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, user_id))
 
     c.execute("""
         INSERT INTO trades (user_id, market_id, side, amount)
@@ -188,10 +191,10 @@ async def buy(ctx, market_id: int, side: str, amount: int):
 
     conn.commit()
 
-    await ctx.send("📈 trade registrato")
+    await ctx.send("📈 Trade registrato")
 
 # =========================
-# PAYOUT ENGINE
+# PAYOUT SAFE
 # =========================
 
 def payout_market(market_id, result):
@@ -209,7 +212,7 @@ def payout_market(market_id, result):
 
     total_win = sum([a for _, a in winners])
 
-    if total_win == 0:
+    if total_win == 0 or losers_pool == 0:
         return
 
     for user_id, amount in winners:
@@ -221,7 +224,7 @@ def payout_market(market_id, result):
     conn.commit()
 
 # =========================
-# RESOLVER
+# RESOLVER (FIXED)
 # =========================
 
 async def resolve_markets():
@@ -233,6 +236,11 @@ async def resolve_markets():
             markets = c.fetchall()
 
             for market_id, match_key in markets:
+
+                # prevent double resolve
+                c.execute("SELECT resolved FROM markets WHERE id=?", (market_id,))
+                if c.fetchone()[0] == 1:
+                    continue
 
                 try:
                     league, teams = match_key.split("_", 1)
@@ -247,6 +255,9 @@ async def resolve_markets():
 
                 winner = result["winner"]
 
+                if winner not in [team1, team2]:
+                    continue
+
                 final_result = "YES" if winner == team1 else "NO"
 
                 c.execute("""
@@ -257,12 +268,14 @@ async def resolve_markets():
                     WHERE id=?
                 """, (final_result, market_id))
 
-                payout_market(market_id, final_result)
-
                 conn.commit()
 
+                print(f"[RESOLVE] {market_id} -> {final_result}")
+
+                payout_market(market_id, final_result)
+
         except Exception as e:
-            print("error:", e)
+            print("ERROR:", e)
 
         await asyncio.sleep(120)
 
