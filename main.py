@@ -273,36 +273,61 @@ async def chart(ctx, market_id: int):
 
     data = list(reversed(c.fetchall()))
 
-    if not data:
-        await ctx.send("❌ Nessun dato storico")
+    if len(data) < 2:
+        await ctx.send("❌ Dati insufficienti")
         return
 
     times = [d[0] for d in data]
-    yes_prices = [d[1] for d in data]
-    no_prices = [100 - p for p in yes_prices]
+    closes = [d[1] for d in data]
 
+    # =========================
+    # CREA OHLC "FAKE MARKET"
+    # =========================
+    ohlc = []
+
+    for i in range(len(closes)):
+        open_price = closes[i-1] if i > 0 else closes[i]
+        close_price = closes[i]
+
+        high = max(open_price, close_price) + abs(close_price - open_price) * 0.6
+        low = min(open_price, close_price) - abs(close_price - open_price) * 0.6
+
+        ohlc.append((open_price, high, low, close_price))
+
+    # =========================
+    # PLOT CANDLESTICK
+    # =========================
     plt.style.use("dark_background")
-    plt.figure(figsize=(9,4))
+    fig, ax = plt.subplots(figsize=(9,4))
 
-    x = np.arange(len(yes_prices))
+    for i, (o, h, l, c_) in enumerate(ohlc):
+        color = "#00ff88" if c_ >= o else "#ff4444"
+
+        # wick
+        ax.plot([i, i], [l, h], color=color, linewidth=1)
+
+        # body
+        ax.plot([i, i], [o, c_], color=color, linewidth=6)
 
     # =========================
-    # SMOOTH YES
+    # STYLE
     # =========================
-    if len(yes_prices) < 3:
-        plt.plot(x, yes_prices, linewidth=3, color="#00ff88", label="YES")
-        plt.plot(x, no_prices, linewidth=3, color="#ff4444", label="NO")
-    else:
-        x_smooth = np.linspace(x.min(), x.max(), 200)
+    ax.set_title("Market Candlestick (YES sentiment)", fontsize=16, fontweight="bold")
+    ax.set_ylabel("Probability (%)")
+    ax.grid(True, alpha=0.15)
 
-        spline_yes = make_interp_spline(x, yes_prices, k=3)
-        spline_no = make_interp_spline(x, no_prices, k=3)
+    step = max(1, len(times)//5)
+    ax.set_xticks(range(0, len(times), step))
+    ax.set_xticklabels([times[i] for i in range(0, len(times), step)], rotation=30)
 
-        yes_smooth = spline_yes(x_smooth)
-        no_smooth = spline_no(x_smooth)
+    buffer = io.BytesIO()
+    plt.tight_layout()
+    plt.savefig(buffer, format="png", facecolor="#0e1117")
+    buffer.seek(0)
 
-        plt.plot(x_smooth, yes_smooth, linewidth=3, color="#00ff88", label="YES")
-        plt.plot(x_smooth, no_smooth, linewidth=3, color="#ff4444", label="NO")
+    await ctx.send(file=discord.File(buffer, "candles.png"))
+
+    plt.close()
 
     # =========================
     # AREA FILL (SOFT)
