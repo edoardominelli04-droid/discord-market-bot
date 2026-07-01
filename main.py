@@ -18,7 +18,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================
-# API FOOTBALL ENGINE
+# API FOOTBALL
 # =========================
 API_KEY = os.environ.get("FOOTBALL_API_KEY")
 
@@ -72,7 +72,6 @@ def get_match_result(team1, team2):
 conn = sqlite3.connect("bot.db")
 c = conn.cursor()
 
-# USERS
 c.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -80,7 +79,6 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# MARKETS
 c.execute("""
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,7 +112,7 @@ def get_user(user_id):
     return result[0]
 
 # =========================
-# COMMANDS
+# COMMANDS BASE
 # =========================
 
 @bot.command()
@@ -125,6 +123,19 @@ async def ping(ctx):
 async def balance(ctx):
     bal = get_user(str(ctx.author.id))
     await ctx.send(f"💰 Il tuo saldo è: {bal} crediti")
+
+# =========================
+# CHECK API (NUOVO)
+# =========================
+
+@bot.command()
+async def checkapi(ctx):
+    key = os.environ.get("FOOTBALL_API_KEY")
+
+    if key:
+        await ctx.send("✅ FOOTBALL_API_KEY presente")
+    else:
+        await ctx.send("❌ FOOTBALL_API_KEY mancante")
 
 # =========================
 # CREATE MARKET (EUROPE)
