@@ -58,7 +58,7 @@ def get_user(user_id):
     return result[0]
 
 # =========================
-# COMMANDS BASE
+# BASE COMMANDS
 # =========================
 
 @bot.command()
@@ -71,7 +71,7 @@ async def balance(ctx):
     await ctx.send(f"💰 Il tuo saldo è: {bal} crediti")
 
 # =========================
-# MARKET CREATION
+# CREATE MARKET
 # =========================
 
 @bot.command()
@@ -146,6 +146,57 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         f"Mercato {market_id} | {side.upper()} +{amount}\n"
         f"YES: {yes_price:.1f}% | NO: {no_price:.1f}%"
     )
+
+# =========================
+# LIST MARKET
+# =========================
+
+@bot.command()
+async def markets(ctx):
+    c.execute("SELECT id, question, yes_price, no_price, total_pool FROM markets WHERE active=1")
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Nessun mercato attivo")
+        return
+
+    msg = "📊 **MERCATI ATTIVI**\n\n"
+
+    for m in rows:
+        mid, q, yes, no, pool = m
+        msg += (
+            f"**ID {mid}**\n"
+            f"{q}\n"
+            f"YES: {yes:.1f}% | NO: {no:.1f}%\n"
+            f"Pool: {pool}\n\n"
+        )
+
+    await ctx.send(msg)
+
+# =========================
+# SINGLE MARKET VIEW
+# =========================
+
+@bot.command()
+async def market(ctx, market_id: int):
+    c.execute("SELECT id, question, yes_price, no_price, total_pool FROM markets WHERE id=?", (market_id,))
+    m = c.fetchone()
+
+    if not m:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    mid, q, yes, no, pool = m
+
+    msg = (
+        f"📊 **MERCATO {mid}**\n\n"
+        f"❓ {q}\n\n"
+        f"🟢 YES: {yes:.1f}%\n"
+        f"🔴 NO: {no:.1f}%\n\n"
+        f"💰 Pool: {pool}\n"
+    )
+
+    await ctx.send(msg)
 
 # =========================
 # READY
