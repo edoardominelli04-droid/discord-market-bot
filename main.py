@@ -1,16 +1,70 @@
 import os
 import discord
 import sqlite3
+import requests
 from discord.ext import commands
 
+# =========================
 # TOKEN
+# =========================
 token = os.environ.get("DISCORD_TOKEN")
 
+# =========================
 # DISCORD SETUP
+# =========================
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# =========================
+# API FOOTBALL ENGINE
+# =========================
+API_KEY = os.environ.get("FOOTBALL_API_KEY")
+
+HEADERS = {
+    "x-apisports-key": API_KEY
+}
+
+def get_match_result(team1, team2):
+    url = "https://v3.football.api-sports.io/fixtures"
+
+    params = {
+        "search": f"{team1} {team2}"
+    }
+
+    try:
+        r = requests.get(url, headers=HEADERS, params=params)
+        data = r.json()
+    except:
+        return None
+
+    if "response" not in data or not data["response"]:
+        return None
+
+    match = data["response"][0]
+
+    status = match["fixture"]["status"]["short"]
+    home = match["teams"]["home"]["name"]
+    away = match["teams"]["away"]["name"]
+    goals_home = match["goals"]["home"]
+    goals_away = match["goals"]["away"]
+
+    if status != "FT":
+        return None
+
+    if goals_home > goals_away:
+        winner = home
+    elif goals_away > goals_home:
+        winner = away
+    else:
+        winner = "DRAW"
+
+    return {
+        "home": home,
+        "away": away,
+        "winner": winner
+    }
 
 # =========================
 # DATABASE
@@ -60,7 +114,7 @@ def get_user(user_id):
     return result[0]
 
 # =========================
-# BASE COMMANDS
+# COMMANDS
 # =========================
 
 @bot.command()
@@ -73,7 +127,7 @@ async def balance(ctx):
     await ctx.send(f"💰 Il tuo saldo è: {bal} crediti")
 
 # =========================
-# ⚽ EUROPEAN CREATE MARKET (NUOVO)
+# CREATE MARKET (EUROPE)
 # =========================
 
 @bot.command()
@@ -83,7 +137,7 @@ async def create(ctx, league: str, match_key: str, *, question):
     allowed_leagues = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
 
     if league not in allowed_leagues:
-        await ctx.send("❌ Lega non valida. Usa: SERIEA, EPL, LA_LIGA, BUNDESLIGA, LIGUE1, UCL")
+        await ctx.send("❌ Lega non valida")
         return
 
     full_match_key = f"{league}_{match_key}"
@@ -96,8 +150,8 @@ async def create(ctx, league: str, match_key: str, *, question):
 
     await ctx.send(
         f"📊 Mercato creato!\n"
-        f"🏆 Lega: {league}\n"
-        f"🆔 Match Key: {full_match_key}\n"
+        f"🏆 {league}\n"
+        f"🆔 {full_match_key}\n"
         f"❓ {question}\n"
         f"YES: 50% | NO: 50%"
     )
