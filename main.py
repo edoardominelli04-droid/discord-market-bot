@@ -34,12 +34,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 API_KEY = os.environ.get("FOOTBALL_API_KEY")
 HEADERS = {"x-apisports-key": API_KEY}
 
-ALLOWED_LEAGUES = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
 
-
-def get_match_result(team1, team2):
+def get_fixture_result(fixture_id):
     url = "https://v3.football.api-sports.io/fixtures"
-    params = {"search": f"{team1} {team2}"}
+    params = {"id": fixture_id}
 
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=10)
@@ -47,42 +45,45 @@ def get_match_result(team1, team2):
     except:
         return None
 
-    if "response" not in data or not data["response"]:
+    if not data.get("response"):
         return None
 
     match = data["response"][0]
 
-    if match["fixture"]["status"]["short"] != "FT":
-        return None
+    status = match["fixture"]["status"]["short"]
 
     home = match["teams"]["home"]["name"]
     away = match["teams"]["away"]["name"]
+
     gh = match["goals"]["home"]
     ga = match["goals"]["away"]
 
+    if status != "FT":
+        return {
+            "finished": False,
+            "status": status,
+            "home": home,
+            "away": away,
+            "home_goals": gh,
+            "away_goals": ga
+        }
+
     if gh > ga:
-        return {"winner": home}
+        winner = "HOME"
     elif ga > gh:
-        return {"winner": away}
+        winner = "AWAY"
     else:
-        return {"winner": "DRAW"}
+        winner = "DRAW"
 
-
-def parse_match_key(match_key):
-    for league in sorted(ALLOWED_LEAGUES, key=len, reverse=True):
-        prefix = f"{league}_"
-
-        if match_key.startswith(prefix):
-            teams = match_key[len(prefix):]
-
-            try:
-                team1, team2 = teams.split("_", 1)
-            except:
-                return None
-
-            return league, team1, team2
-
-    return None
+    return {
+        "finished": True,
+        "status": status,
+        "home": home,
+        "away": away,
+        "home_goals": gh,
+        "away_goals": ga,
+        "winner": winner
+    }
 
 
 # =========================
@@ -178,22 +179,28 @@ async def balance(ctx):
 
 
 # =========================
-# CREATE MARKET
+# CREATE MARKET FROM FIXTURE API
 # =========================
 @bot.command()
-async def create(ctx, league: str, match_key: str, *, question):
+async def createfixture(ctx, fixture_id: int, *, question):
 
-    league = league.upper()
+    res = get_fixture_result(fixture_id)
 
-    if league not in ALLOWED_LEAGUES:
-        await ctx.send("❌ Lega non valida")
+    if not res:
+        await ctx.send("❌ Fixture non trovata nell'API")
         return
 
-    full = f"{league}_{match_key}"
+    if res["finished"]:
+        await ctx.send("❌ Questa partita è già finita")
+        return
+
+    home = res["home"]
+    away = res["away"]
+    status = res["status"]
 
     c.execute("""
         INSERT INTO markets VALUES (NULL, ?, 0, 0, 0, 1, ?, 0, NULL)
-    """, (question, full))
+    """, (question, f"FIXTURE_{fixture_id}"))
 
     market_id = c.lastrowid
     conn.commit()
@@ -201,9 +208,13 @@ async def create(ctx, league: str, match_key: str, *, question):
     await ctx.send(
 f"""📊 Mercato creato!
 
-🏆 Lega: {league}
 🆔 ID Mercato: {market_id}
-🆔 Match: {full}
+🆔 Fixture API: {fixture_id}
+
+🏟️ Partita:
+{home} vs {away}
+
+📡 Stato API: {status}
 
 ❓ Domanda:
 {question}
@@ -233,7 +244,7 @@ async def markets(ctx):
     for mid, q, yes, no in rows:
         total = yes + no
         yp = 50 if total == 0 else round((yes / total) * 100, 1)
-        np = 100 - yp
+        np = round(100 - yp, 1)
 
         msg += f"""🆔 {mid}
 ❓ {q}
@@ -255,7 +266,7 @@ async def markets(ctx):
 async def market(ctx, market_id: int):
 
     c.execute("""
-        SELECT question, yes_pool, no_pool, active, resolved, result
+        SELECT question, yes_pool, no_pool, active, resolved, result, match_key
         FROM markets
         WHERE id=?
     """, (market_id,))
@@ -266,16 +277,32 @@ async def market(ctx, market_id: int):
         await ctx.send("❌ Mercato non trovato")
         return
 
-    q, yes, no, active, resolved, result = row
+    q, yes, no, active, resolved, result, match_key = row
     total = yes + no
 
     yes_p = 50 if total == 0 else round((yes / total) * 100, 1)
-    no_p = 100 - yes_p
+    no_p = round(100 - yes_p, 1)
+
+    fixture_text = ""
+
+    if match_key and match_key.startswith("FIXTURE_"):
+        fixture_id = match_key.replace("FIXTURE_", "")
+        res = get_fixture_result(fixture_id)
+
+        if res:
+            fixture_text = f"""
+🏟️ Partita:
+{res["home"]} vs {res["away"]}
+
+📡 Stato API: {res["status"]}
+"""
+            if res["home_goals"] is not None and res["away_goals"] is not None:
+                fixture_text += f"⚽ Risultato live/finale: {res['home_goals']}-{res['away_goals']}\n"
 
     if active == 1:
         status = "ATTIVO"
     elif resolved == 1:
-        status = f"CHIUSO | Risultato: {result}"
+        status = f"CHIUSO | Risultato mercato: {result}"
     else:
         status = "CHIUSO"
 
@@ -283,7 +310,7 @@ async def market(ctx, market_id: int):
 f"""📊 MERCATO #{market_id}
 
 ❓ {q}
-
+{fixture_text}
 🟢 YES: {yes_p}%
 🔴 NO: {no_p}%
 
@@ -512,30 +539,28 @@ async def resolve():
 
             for mid, mk in markets:
 
-                c.execute("SELECT resolved FROM markets WHERE id=?", (mid,))
-                row = c.fetchone()
-
-                if row and row[0] == 1:
+                if not mk or not mk.startswith("FIXTURE_"):
                     continue
 
-                parsed = parse_match_key(mk)
-
-                if not parsed:
+                try:
+                    fixture_id = int(mk.replace("FIXTURE_", ""))
+                except:
                     continue
 
-                league, t1, t2 = parsed
-
-                res = get_match_result(t1, t2)
+                res = get_fixture_result(fixture_id)
 
                 if not res:
                     continue
 
-                winner = res["winner"]
-
-                if winner not in [t1, t2]:
+                if not res["finished"]:
                     continue
 
-                final = "YES" if winner == t1 else "NO"
+                winner = res["winner"]
+
+                if winner == "HOME":
+                    final = "YES"
+                else:
+                    final = "NO"
 
                 c.execute("""
                     UPDATE markets
