@@ -61,11 +61,7 @@ def get_match_result(team1, team2):
     else:
         winner = "DRAW"
 
-    return {
-        "home": home,
-        "away": away,
-        "winner": winner
-    }
+    return {"winner": winner}
 
 # =========================
 # DATABASE
@@ -73,6 +69,7 @@ def get_match_result(team1, team2):
 conn = sqlite3.connect("bot.db")
 c = conn.cursor()
 
+# USERS
 c.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -80,6 +77,7 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
+# MARKETS
 c.execute("""
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +92,17 @@ CREATE TABLE IF NOT EXISTS markets (
 )
 """)
 
+# TRADES
+c.execute("""
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    market_id INTEGER,
+    side TEXT,
+    amount INTEGER
+)
+""")
+
 conn.commit()
 
 # =========================
@@ -104,10 +113,7 @@ def get_user(user_id):
     result = c.fetchone()
 
     if result is None:
-        c.execute(
-            "INSERT INTO users (user_id, balance) VALUES (?, ?)",
-            (user_id, 1000)
-        )
+        c.execute("INSERT INTO users VALUES (?, ?)", (user_id, 1000))
         conn.commit()
         return 1000
 
@@ -124,16 +130,14 @@ async def ping(ctx):
 @bot.command()
 async def balance(ctx):
     bal = get_user(str(ctx.author.id))
-    await ctx.send(f"💰 Il tuo saldo è: {bal} crediti")
+    await ctx.send(f"💰 {bal} crediti")
 
 @bot.command()
 async def checkapi(ctx):
-    key = os.environ.get("FOOTBALL_API_KEY")
-
-    if key:
-        await ctx.send("✅ FOOTBALL_API_KEY presente")
+    if os.environ.get("FOOTBALL_API_KEY"):
+        await ctx.send("✅ API OK")
     else:
-        await ctx.send("❌ FOOTBALL_API_KEY mancante")
+        await ctx.send("❌ API MANCANTE")
 
 # =========================
 # CREATE MARKET
@@ -143,98 +147,81 @@ async def checkapi(ctx):
 async def create(ctx, league: str, match_key: str, *, question):
     league = league.upper()
 
-    allowed_leagues = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
+    allowed = ["SERIEA", "EPL", "LA_LIGA", "BUNDESLIGA", "LIGUE1", "UCL"]
 
-    if league not in allowed_leagues:
+    if league not in allowed:
         await ctx.send("❌ Lega non valida")
         return
 
     full_match_key = f"{league}_{match_key}"
 
-    c.execute(
-        "INSERT INTO markets (question, yes_price, no_price, total_pool, active, match_key, resolved, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (question, 50.0, 50.0, 0, 1, full_match_key, 0, None)
-    )
+    c.execute("""
+        INSERT INTO markets (question, yes_price, no_price, total_pool, active, match_key, resolved, result)
+        VALUES (?, 50, 50, 0, 1, ?, 0, NULL)
+    """, (question, full_match_key))
+
     conn.commit()
 
-    await ctx.send(f"📊 Mercato creato: {full_match_key}")
+    await ctx.send(f"📊 Mercato creato {full_match_key}")
 
 # =========================
-# BUY SYSTEM
+# BUY
 # =========================
 
 @bot.command()
 async def buy(ctx, market_id: int, side: str, amount: int):
-    side = side.lower()
-
-    if side not in ["yes", "no"]:
-        await ctx.send("❌ Usa YES o NO")
-        return
-
-    c.execute("SELECT yes_price, no_price, total_pool FROM markets WHERE id=?", (market_id,))
-    market = c.fetchone()
-
-    if not market:
-        await ctx.send("❌ Mercato non trovato")
-        return
-
-    yes_price, no_price, total_pool = market
-
     user_id = str(ctx.author.id)
+    side = side.upper()
+
     bal = get_user(user_id)
 
     if amount > bal:
-        await ctx.send("❌ Non hai abbastanza crediti")
+        await ctx.send("❌ fondi insufficienti")
         return
 
-    new_bal = bal - amount
-    c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_bal, user_id))
-
-    total_pool += amount
-
-    if side == "yes":
-        yes_price += amount * 0.05
-        no_price -= amount * 0.03
-    else:
-        no_price += amount * 0.05
-        yes_price -= amount * 0.03
-
-    yes_price = max(1, min(99, yes_price))
-    no_price = max(1, min(99, no_price))
+    c.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, user_id))
 
     c.execute("""
-        UPDATE markets
-        SET yes_price=?, no_price=?, total_pool=?
-        WHERE id=?
-    """, (yes_price, no_price, total_pool, market_id))
+        INSERT INTO trades (user_id, market_id, side, amount)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, market_id, side, amount))
 
     conn.commit()
 
-    await ctx.send(f"📈 Acquisto OK | Market {market_id}")
+    await ctx.send("📈 trade registrato")
 
 # =========================
-# LIST MARKETS
+# PAYOUT ENGINE
 # =========================
 
-@bot.command()
-async def markets(ctx):
-    c.execute("SELECT id, question, yes_price, no_price, total_pool FROM markets WHERE active=1")
-    rows = c.fetchall()
+def payout_market(market_id, result):
+    c.execute("SELECT user_id, side, amount FROM trades WHERE market_id=?", (market_id,))
+    trades = c.fetchall()
 
-    if not rows:
-        await ctx.send("📭 Nessun mercato attivo")
+    winners = []
+    losers_pool = 0
+
+    for user_id, side, amount in trades:
+        if side == result:
+            winners.append((user_id, amount))
+        else:
+            losers_pool += amount
+
+    total_win = sum([a for _, a in winners])
+
+    if total_win == 0:
         return
 
-    msg = "📊 **MERCATI ATTIVI**\n\n"
+    for user_id, amount in winners:
+        share = amount / total_win
+        payout = int(share * losers_pool + amount)
 
-    for m in rows:
-        mid, q, yes, no, pool = m
-        msg += f"ID {mid} | {q}\nYES {yes:.1f}% | NO {no:.1f}%\n\n"
+        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (payout, user_id))
 
-    await ctx.send(msg)
+    conn.commit()
 
 # =========================
-# AUTO RESOLVE ENGINE
+# RESOLVER
 # =========================
 
 async def resolve_markets():
@@ -245,8 +232,7 @@ async def resolve_markets():
             c.execute("SELECT id, match_key FROM markets WHERE active=1 AND resolved=0")
             markets = c.fetchall()
 
-            for market in markets:
-                market_id, match_key = market
+            for market_id, match_key in markets:
 
                 try:
                     league, teams = match_key.split("_", 1)
@@ -256,16 +242,12 @@ async def resolve_markets():
 
                 result = get_match_result(team1, team2)
 
-                if result is None:
+                if not result:
                     continue
 
                 winner = result["winner"]
 
-                # YES se vince la prima squadra
-                if winner == team1:
-                    final_result = "YES"
-                else:
-                    final_result = "NO"
+                final_result = "YES" if winner == team1 else "NO"
 
                 c.execute("""
                     UPDATE markets
@@ -275,12 +257,12 @@ async def resolve_markets():
                     WHERE id=?
                 """, (final_result, market_id))
 
+                payout_market(market_id, final_result)
+
                 conn.commit()
 
-                print(f"Market {market_id} chiuso -> {final_result}")
-
         except Exception as e:
-            print("Resolver error:", e)
+            print("error:", e)
 
         await asyncio.sleep(120)
 
@@ -290,7 +272,7 @@ async def resolve_markets():
 
 @bot.event
 async def on_ready():
-    print(f"Bot online come {bot.user}")
+    print(f"Bot online {bot.user}")
     bot.loop.create_task(resolve_markets())
 
 # =========================
