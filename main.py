@@ -260,7 +260,7 @@ async def chart(ctx, market_id: int):
         FROM price_history
         WHERE market_id=?
         ORDER BY id DESC
-        LIMIT 30
+        LIMIT 25
     """, (market_id,))
 
     data = list(reversed(c.fetchall()))
@@ -272,23 +272,35 @@ async def chart(ctx, market_id: int):
     times = [d[0] for d in data]
     prices = [d[1] for d in data]
 
-    plt.figure(figsize=(8,4))
+    plt.style.use("dark_background")
 
-    plt.plot(prices, linewidth=2)
+    plt.figure(figsize=(9,4))
 
-    plt.title("📊 YES Price Trend", fontsize=14)
-    plt.xlabel("Time")
-    plt.ylabel("YES %")
+    # linea stile trading
+    plt.plot(prices, linewidth=3, color="#00ff88")
 
-    plt.grid(True, alpha=0.3)
+    # riempimento sotto linea (effetto app trading)
+    plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
 
-    plt.xticks(range(0, len(times), max(1, len(times)//5)),
-               [times[i] for i in range(0, len(times), max(1, len(times)//5))],
-               rotation=45)
+    plt.title("📊 YES Market Price", fontsize=14, color="white")
+    plt.ylabel("Probability (%)")
+
+    plt.grid(True, alpha=0.15)
+
+    # asse X più pulito
+    step = max(1, len(times)//5)
+    plt.xticks(
+        range(0, len(times), step),
+        [times[i] for i in range(0, len(times), step)],
+        rotation=30,
+        color="white"
+    )
+
+    plt.yticks(color="white")
 
     buffer = io.BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png")
+    plt.savefig(buffer, format="png", facecolor="#0e1117")
     buffer.seek(0)
 
     await ctx.send(file=discord.File(buffer, "chart.png"))
