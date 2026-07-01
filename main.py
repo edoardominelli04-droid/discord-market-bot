@@ -267,32 +267,90 @@ async def chart(ctx, market_id: int):
         SELECT timestamp, yes_price
         FROM price_history
         WHERE market_id=?
-        ORDER BY id DESC
-        LIMIT 25
+        ORDER BY id ASC
+        LIMIT 60
     """, (market_id,))
 
-    data = list(reversed(c.fetchall()))
+    data = c.fetchall()
 
     if len(data) < 2:
         await ctx.send("❌ Dati insufficienti")
         return
 
+    # =========================
+    # PREPARAZIONE DATI
+    # =========================
     times = [d[0] for d in data]
-    closes = [d[1] for d in data]
+    yes_prices = [d[1] for d in data]
+    no_prices = [100 - y for y in yes_prices]
+
+    x = list(range(len(yes_prices)))  # più stabile dei timestamp
 
     # =========================
-    # CREA OHLC "FAKE MARKET"
+    # SMOOTH (MOVING AVERAGE LEGGERO)
     # =========================
-    ohlc = []
+    def smooth(arr, window=3):
+        if len(arr) < window:
+            return arr
+        return [
+            sum(arr[max(0, i-window):i+1]) / min(i+1, window)
+            for i in range(len(arr))
+        ]
 
-    for i in range(len(closes)):
-        open_price = closes[i-1] if i > 0 else closes[i]
-        close_price = closes[i]
+    yes_smooth = smooth(yes_prices)
+    no_smooth = smooth(no_prices)
 
-        high = max(open_price, close_price) + abs(close_price - open_price) * 0.6
-        low = min(open_price, close_price) - abs(close_price - open_price) * 0.6
+    # =========================
+    # GRAFICO
+    # =========================
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor("#0e1117")
+    ax.set_facecolor("#0e1117")
 
-        ohlc.append((open_price, high, low, close_price))
+    # LINEE PRINCIPALI
+    ax.plot(x, yes_smooth, label="YES", linewidth=2.5, color="#00ff88")
+    ax.plot(x, no_smooth, label="NO", linewidth=2.5, color="#ff4444")
+
+    # LINEA 50% (DECISION THRESHOLD)
+    ax.axhline(50, linestyle="--", linewidth=1, alpha=0.3, color="white")
+
+    # AREA LEGGERA (molto soft)
+    ax.fill_between(x, yes_smooth, alpha=0.10, color="#00ff88")
+    ax.fill_between(x, no_smooth, alpha=0.05, color="#ff4444")
+
+    # =========================
+    # STILE
+    # =========================
+    ax.set_title("Market Probability", fontsize=15, fontweight="bold", color="white")
+    ax.set_ylabel("Probability (%)", color="white")
+    ax.set_ylim(0, 100)
+
+    ax.grid(True, alpha=0.15)
+
+    # X LABELS RIDOTTE (NON SPAM)
+    step = max(1, len(x)//6)
+    ax.set_xticks(range(0, len(x), step))
+    ax.set_xticklabels(
+        [times[i] for i in range(0, len(times), step)],
+        rotation=25,
+        color="white"
+    )
+
+    ax.tick_params(colors="white")
+    ax.legend()
+
+    plt.tight_layout()
+
+    # =========================
+    # OUTPUT DISCORD
+    # =========================
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format="png", facecolor="#0e1117")
+    buffer.seek(0)
+
+    await ctx.send(file=discord.File(buffer, "market_chart.png"))
+
+    plt.close()
 
     # =========================
     # PLOT CANDLESTICK
