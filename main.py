@@ -3,12 +3,11 @@ import discord
 import sqlite3
 from discord.ext import commands
 
-# TOKEN
 token = os.environ.get("DISCORD_TOKEN")
 
-# DISCORD SETUP
 intents = discord.Intents.default()
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # DATABASE
@@ -21,10 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
     balance INTEGER
 )
 """)
-
 conn.commit()
 
-# FUNZIONE: crea utente se non esiste
 def get_user(user_id):
     c.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
     result = c.fetchone()
@@ -36,7 +33,10 @@ def get_user(user_id):
 
     return result[0]
 
-# COMANDO BALANCE
+@bot.command()
+async def ping(ctx):
+    await ctx.send("pong 🟢")
+
 @bot.command()
 async def balance(ctx):
     bal = get_user(str(ctx.author.id))
