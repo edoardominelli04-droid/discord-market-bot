@@ -12,6 +12,9 @@ plt.rcParams["axes.titleweight"] = "bold"
 plt.rcParams["axes.labelsize"] = 11
 from datetime import datetime
 from discord.ext import commands
+from scipy.interpolate import make_interp_spline
+import numpy as np
+
 
 # =========================
 # TOKEN
@@ -282,7 +285,15 @@ async def chart(ctx, market_id: int):
     plt.figure(figsize=(9,4))
 
     # linea stile trading
-    plt.plot(prices, linewidth=3, color="#00ff88")
+    x = np.arange(len(prices))
+y = np.array(prices)
+
+x_smooth = np.linspace(x.min(), x.max(), 200)
+
+spline = make_interp_spline(x, y, k=3)
+y_smooth = spline(x_smooth)
+
+plt.plot(x_smooth, y_smooth, linewidth=3)
 
     # riempimento sotto linea (effetto app trading)
     plt.fill_between(range(len(prices)), prices, alpha=0.2, color="#00ff88")
