@@ -23,13 +23,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # =========================
 API_KEY = os.environ.get("FOOTBALL_API_KEY")
 
-HEADERS = {
-    "x-apisports-key": API_KEY
-}
+HEADERS = {"x-apisports-key": API_KEY}
 
 def get_match_result(team1, team2):
     url = "https://v3.football.api-sports.io/fixtures"
-
     params = {"search": f"{team1} {team2}"}
 
     try:
@@ -46,20 +43,18 @@ def get_match_result(team1, team2):
     status = match["fixture"]["status"]["short"]
     home = match["teams"]["home"]["name"]
     away = match["teams"]["away"]["name"]
-    goals_home = match["goals"]["home"]
-    goals_away = match["goals"]["away"]
+    gh = match["goals"]["home"]
+    ga = match["goals"]["away"]
 
     if status != "FT":
         return None
 
-    if goals_home > goals_away:
-        winner = home
-    elif goals_away > goals_home:
-        winner = away
+    if gh > ga:
+        return {"winner": home}
+    elif ga > gh:
+        return {"winner": away}
     else:
-        winner = "DRAW"
-
-    return {"winner": winner}
+        return {"winner": "DRAW"}
 
 # =========================
 # DATABASE
@@ -78,8 +73,8 @@ c.execute("""
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     question TEXT,
-    yes_price REAL,
-    no_price REAL,
+    yes_pool INTEGER,
+    no_pool INTEGER,
     total_pool INTEGER,
     active INTEGER,
     match_key TEXT,
@@ -105,14 +100,14 @@ conn.commit()
 # =========================
 def get_user(user_id):
     c.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
-    result = c.fetchone()
+    r = c.fetchone()
 
-    if result is None:
+    if not r:
         c.execute("INSERT INTO users VALUES (?, ?)", (user_id, 1000))
         conn.commit()
         return 1000
 
-    return result[0]
+    return r[0]
 
 # =========================
 # COMMANDS
@@ -126,13 +121,6 @@ async def ping(ctx):
 async def balance(ctx):
     bal = get_user(str(ctx.author.id))
     await ctx.send(f"💰 {bal}")
-
-@bot.command()
-async def checkapi(ctx):
-    if os.environ.get("FOOTBALL_API_KEY"):
-        await ctx.send("✅ API OK")
-    else:
-        await ctx.send("❌ API MANCANTE")
 
 # =========================
 # CREATE MARKET
@@ -148,18 +136,46 @@ async def create(ctx, league: str, match_key: str, *, question):
         await ctx.send("❌ Lega non valida")
         return
 
-    full_match_key = f"{league}_{match_key}"
+    full = f"{league}_{match_key}"
 
     c.execute("""
-        INSERT INTO markets VALUES (NULL, ?, 50, 50, 0, 1, ?, 0, NULL)
-    """, (question, full_match_key))
+        INSERT INTO markets VALUES (NULL, ?, 0, 0, 0, 1, ?, 0, NULL)
+    """, (question, full))
 
     conn.commit()
 
-    await ctx.send(f"📊 Mercato creato {full_match_key}")
+    await ctx.send(f"📊 Mercato creato {full}")
 
 # =========================
-# BUY (FIX ANTI-BUG)
+# MARKET VIEW (POOL PRICES)
+# =========================
+
+@bot.command()
+async def markets(ctx):
+    c.execute("SELECT id, question, yes_pool, no_pool FROM markets WHERE active=1")
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Nessun mercato")
+        return
+
+    msg = "📊 MERCATI\n\n"
+
+    for mid, q, yes, no in rows:
+        total = yes + no
+
+        if total == 0:
+            yp, np = 50, 50
+        else:
+            yp = round((yes / total) * 100, 2)
+            np = round((no / total) * 100, 2)
+
+        msg += f"ID {mid} | {q}\nYES {yp}% | NO {np}%\n\n"
+
+    await ctx.send(msg)
+
+# =========================
+# BUY (POOL SYSTEM)
 # =========================
 
 @bot.command()
@@ -167,11 +183,10 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     user_id = str(ctx.author.id)
     side = side.upper()
 
-    # check mercato attivo
     c.execute("SELECT active FROM markets WHERE id=?", (market_id,))
-    market = c.fetchone()
+    m = c.fetchone()
 
-    if not market or market[0] == 0:
+    if not m or m[0] == 0:
         await ctx.send("❌ Mercato chiuso")
         return
 
@@ -181,8 +196,14 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         await ctx.send("❌ Fondi insufficienti")
         return
 
-    # update balance sicuro
     c.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, user_id))
+
+    if side == "YES":
+        c.execute("UPDATE markets SET yes_pool = yes_pool + ?, total_pool = total_pool + ? WHERE id=?",
+                  (amount, amount, market_id))
+    else:
+        c.execute("UPDATE markets SET no_pool = no_pool + ?, total_pool = total_pool + ? WHERE id=?",
+                  (amount, amount, market_id))
 
     c.execute("""
         INSERT INTO trades (user_id, market_id, side, amount)
@@ -191,10 +212,10 @@ async def buy(ctx, market_id: int, side: str, amount: int):
 
     conn.commit()
 
-    await ctx.send("📈 Trade registrato")
+    await ctx.send("📈 Trade OK")
 
 # =========================
-# PAYOUT SAFE
+# PAYOUT
 # =========================
 
 def payout_market(market_id, result):
@@ -204,30 +225,30 @@ def payout_market(market_id, result):
     winners = []
     losers_pool = 0
 
-    for user_id, side, amount in trades:
-        if side == result:
-            winners.append((user_id, amount))
+    for u, s, a in trades:
+        if s == result:
+            winners.append((u, a))
         else:
-            losers_pool += amount
+            losers_pool += a
 
-    total_win = sum([a for _, a in winners])
+    total_win = sum(a for _, a in winners)
 
-    if total_win == 0 or losers_pool == 0:
+    if total_win == 0:
         return
 
-    for user_id, amount in winners:
-        share = amount / total_win
-        payout = int(share * losers_pool + amount)
+    for u, a in winners:
+        share = a / total_win
+        payout = int(a + share * losers_pool)
 
-        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (payout, user_id))
+        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (payout, u))
 
     conn.commit()
 
 # =========================
-# RESOLVER (FIXED)
+# RESOLVER
 # =========================
 
-async def resolve_markets():
+async def resolve():
     await bot.wait_until_ready()
 
     while not bot.is_closed():
@@ -235,30 +256,29 @@ async def resolve_markets():
             c.execute("SELECT id, match_key FROM markets WHERE active=1 AND resolved=0")
             markets = c.fetchall()
 
-            for market_id, match_key in markets:
+            for mid, mk in markets:
 
-                # prevent double resolve
-                c.execute("SELECT resolved FROM markets WHERE id=?", (market_id,))
+                c.execute("SELECT resolved FROM markets WHERE id=?", (mid,))
                 if c.fetchone()[0] == 1:
                     continue
 
                 try:
-                    league, teams = match_key.split("_", 1)
-                    team1, team2 = teams.split("_")
+                    league, teams = mk.split("_", 1)
+                    t1, t2 = teams.split("_")
                 except:
                     continue
 
-                result = get_match_result(team1, team2)
+                res = get_match_result(t1, t2)
 
-                if not result:
+                if not res:
                     continue
 
-                winner = result["winner"]
+                winner = res["winner"]
 
-                if winner not in [team1, team2]:
+                if winner not in [t1, t2]:
                     continue
 
-                final_result = "YES" if winner == team1 else "NO"
+                final = "YES" if winner == t1 else "NO"
 
                 c.execute("""
                     UPDATE markets
@@ -266,16 +286,16 @@ async def resolve_markets():
                         resolved=1,
                         result=?
                     WHERE id=?
-                """, (final_result, market_id))
+                """, (final, mid))
 
                 conn.commit()
 
-                print(f"[RESOLVE] {market_id} -> {final_result}")
+                payout_market(mid, final)
 
-                payout_market(market_id, final_result)
+                print(f"[CLOSED] {mid} -> {final}")
 
         except Exception as e:
-            print("ERROR:", e)
+            print("ERR:", e)
 
         await asyncio.sleep(120)
 
@@ -286,7 +306,7 @@ async def resolve_markets():
 @bot.event
 async def on_ready():
     print(f"Bot online {bot.user}")
-    bot.loop.create_task(resolve_markets())
+    bot.loop.create_task(resolve())
 
 # =========================
 # RUN
