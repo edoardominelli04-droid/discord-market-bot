@@ -791,57 +791,82 @@ Non hai ancora aperto nessuna posizione.
 # =========================
 @bot.command()
 async def profile(ctx):
+
     user_id = str(ctx.author.id)
     balance = get_user(user_id)
 
-    total_invested, total_value, _, open_positions = calculate_user_open_value(user_id)
-    net_worth = balance + total_value
-    open_profit = total_value - total_invested
-    roi = 0 if total_invested == 0 else (open_profit / total_invested) * 100
-
+    # Totale investito
     c.execute("""
-        SELECT COUNT(DISTINCT m.id)
-        FROM trades t
-        JOIN markets m ON t.market_id=m.id
-        WHERE t.user_id=?
-          AND m.resolved=1
+        SELECT COALESCE(SUM(amount), 0)
+        FROM trades
+        WHERE user_id=?
     """, (user_id,))
-    resolved_markets = c.fetchone()[0] or 0
+    total_invested = c.fetchone()[0] or 0
 
+    # Trade totali
     c.execute("""
-        SELECT COUNT(DISTINCT m.id)
+        SELECT COUNT(*)
+        FROM trades
+        WHERE user_id=?
+    """, (user_id,))
+    total_trades = c.fetchone()[0] or 0
+
+    # Mercati vinti
+    c.execute("""
+        SELECT COUNT(*)
         FROM trades t
-        JOIN markets m ON t.market_id=m.id
+        JOIN markets m ON t.market_id = m.id
         WHERE t.user_id=?
           AND m.resolved=1
           AND t.side=m.result
     """, (user_id,))
-    won_markets = c.fetchone()[0] or 0
+    wins = c.fetchone()[0] or 0
 
-    lost_markets = max(0, resolved_markets - won_markets)
-    accuracy = 0 if resolved_markets == 0 else (won_markets / resolved_markets) * 100
+    # Mercati persi
+    c.execute("""
+        SELECT COUNT(*)
+        FROM trades t
+        JOIN markets m ON t.market_id = m.id
+        WHERE t.user_id=?
+          AND m.resolved=1
+          AND t.side!=m.result
+    """, (user_id,))
+    losses = c.fetchone()[0] or 0
 
-    c.execute("SELECT COUNT(*) FROM trades WHERE user_id=?", (user_id,))
-    total_trades = c.fetchone()[0] or 0
+    closed = wins + losses
+    accuracy = 0 if closed == 0 else round((wins / closed) * 100, 1)
 
-    await ctx.send(
-f"""👤 PROFILO DI {ctx.author.display_name}
+    # Posizioni aperte
+    c.execute("""
+        SELECT COUNT(*)
+        FROM trades t
+        JOIN markets m ON t.market_id = m.id
+        WHERE t.user_id=?
+          AND m.active=1
+    """, (user_id,))
+    open_positions = c.fetchone()[0] or 0
 
-💰 Saldo: {balance}
-💼 Patrimonio stimato: {net_worth:.0f}
-
-📊 Posizioni aperte: {open_positions}
-💸 Investito aperto: {total_invested:.0f}
-📈 Valore aperto: {total_value:.0f}
-📊 Profitto aperto: {open_profit:+.0f} ({roi:+.1f}%)
-
-🏆 Mercati vinti: {won_markets}
-❌ Mercati persi: {lost_markets}
-🎯 Accuracy: {accuracy:.1f}%
-
-📜 Trade totali: {total_trades}
-"""
+    embed = discord.Embed(
+        title=f"👤 Profilo di {ctx.author.display_name}",
+        description="Statistiche personali del trader",
+        color=0x22c55e
     )
+
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+
+    embed.add_field(name="💰 Saldo", value=f"{balance} crediti", inline=True)
+    embed.add_field(name="💼 Investito totale", value=f"{total_invested} crediti", inline=True)
+    embed.add_field(name="📊 Trade totali", value=str(total_trades), inline=True)
+
+    embed.add_field(name="🏆 Trade vinti", value=str(wins), inline=True)
+    embed.add_field(name="❌ Trade persi", value=str(losses), inline=True)
+    embed.add_field(name="🎯 Accuracy", value=f"{accuracy}%", inline=True)
+
+    embed.add_field(name="🟢 Posizioni aperte", value=str(open_positions), inline=True)
+
+    embed.set_footer(text="Prediction Market Bot")
+
+    await ctx.send(embed=embed)
 
 
 # =========================
