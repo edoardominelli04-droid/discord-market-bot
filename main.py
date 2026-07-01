@@ -830,7 +830,7 @@ async def buy(ctx, market_id: int, side: str, amount: int):
             WHERE id=?
         """, (amount, amount, market_id))
 
-       c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
+    c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
     yes, no = c.fetchone()
 
     total = yes + no
