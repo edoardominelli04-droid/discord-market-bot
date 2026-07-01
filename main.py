@@ -172,6 +172,20 @@ CREATE TABLE IF NOT EXISTS price_history (
 )
 """)
 
+# =========================
+# DATABASE UPDATE
+# =========================
+
+try:
+    c.execute("ALTER TABLE trades ADD COLUMN price REAL")
+except:
+    pass
+
+try:
+    c.execute("ALTER TABLE markets ADD COLUMN channel_id TEXT")
+except:
+    pass
+
 conn.commit()
 
 
@@ -458,9 +472,20 @@ Prova prima:
     away = res["away"]
     status = res["status"]
 
-    c.execute("""
-        INSERT INTO markets VALUES (NULL, ?, 0, 0, 0, 1, ?, 0, NULL)
-    """, (question, f"MATCH_{match_id}"))
+c.execute("""
+    INSERT INTO markets (
+        question,
+        yes_pool,
+        no_pool,
+        total_pool,
+        active,
+        match_key,
+        resolved,
+        result,
+        channel_id
+    )
+    VALUES (?, 0, 0, 0, 1, ?, 0, NULL, ?)
+""", (question, f"MATCH_{match_id}", str(ctx.channel.id)))
 
     market_id = c.lastrowid
     conn.commit()
@@ -581,6 +606,184 @@ f"""📊 MERCATO #{market_id}
 
 
 # =========================
+# PORTFOLIO
+# =========================
+@bot.command()
+async def portfolio(ctx):
+
+    user_id = str(ctx.author.id)
+
+    balance = get_user(user_id)
+
+    c.execute("""
+    SELECT
+        t.market_id,
+        m.question,
+        m.yes_pool,
+        m.no_pool,
+        m.total_pool,
+        m.active,
+        t.side,
+        t.amount,
+        t.price
+    FROM trades t
+    JOIN markets m
+        ON t.market_id=m.id
+    WHERE t.user_id=?
+    ORDER BY t.market_id DESC
+    """,(user_id,))
+
+    rows = c.fetchall()
+
+    if not rows:
+
+        await ctx.send(
+f"""💼 PORTFOLIO DI {ctx.author.display_name}
+
+💰 Saldo: {balance}
+
+Non hai ancora aperto nessuna posizione.
+"""
+        )
+        return
+
+    msg = f"""💼 PORTFOLIO DI {ctx.author.display_name}
+
+💰 Saldo: {balance}
+
+────────────────────
+
+"""
+
+    for market_id, question, yes, no, total, active, side, amount, entry_price in rows:
+
+        if total == 0:
+            current_yes = 50
+        else:
+            current_yes = (yes/total)*100
+
+        current_no = 100-current_yes
+
+        current_price = current_yes if side=="YES" else current_no
+
+        invested = amount
+
+        current_value = invested*(current_price/entry_price)
+
+        if side=="YES":
+            possible_win = invested
+
+            if yes>0:
+                possible_win += invested*(no/yes)
+
+        else:
+
+            possible_win = invested
+
+            if no>0:
+                possible_win += invested*(yes/no)
+
+        profit = current_value-invested
+
+        status="🟢 LIVE" if active else "⚪ CHIUSO"
+
+        emoji="🟢" if side=="YES" else "🔴"
+
+        msg += f"""
+📊 Mercato {market_id}
+
+❓ {question}
+
+{emoji} Posizione: {side}
+
+💸 Investito: {invested:.0f}
+
+📈 Valore attuale: {current_value:.0f}
+
+💰 Possibile vincita: {possible_win:.0f}
+
+📊 Profitto:
+{profit:+.0f}
+
+{status}
+
+────────────────────
+"""
+
+    await send_long(ctx,msg)
+
+
+# =========================
+# LIVE MARKETS
+# =========================
+@bot.command()
+async def live(ctx):
+
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool, total_pool, match_key
+        FROM markets
+        WHERE active=1
+    """)
+
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Nessun mercato attivo")
+        return
+
+    msg = "🔴 LIVE MARKETS\n\n"
+    found_live = False
+
+    for market_id, question, yes, no, total, match_key in rows:
+
+        if not match_key or not match_key.startswith("MATCH_"):
+            continue
+
+        try:
+            match_id = int(match_key.replace("MATCH_", ""))
+        except:
+            continue
+
+        res = get_match_result(match_id)
+
+        if not res:
+            continue
+
+        if res["status"] not in ["IN_PLAY", "PAUSED"]:
+            continue
+
+        found_live = True
+
+        yes_p = 50 if total == 0 else round((yes / total) * 100, 1)
+        no_p = round(100 - yes_p, 1)
+
+        score = "N/D"
+        if res["home_goals"] is not None and res["away_goals"] is not None:
+            score = f'{res["home_goals"]}-{res["away_goals"]}'
+
+        msg += f"""🆔 Mercato {market_id}
+
+🏟️ {res["home"]} vs {res["away"]}
+⚽ Risultato: {score}
+📡 Stato: {res["status"]}
+
+❓ {question}
+
+🟢 YES: {yes_p}%
+🔴 NO: {no_p}%
+💰 Pool: {total}
+
+────────────────
+"""
+
+    if not found_live:
+        await ctx.send("📭 Nessun mercato live in questo momento")
+        return
+
+    await send_long(ctx, msg)
+
+    
+# =========================
 # BUY + PRICE UPDATE
 # =========================
 @bot.command()
@@ -627,19 +830,23 @@ async def buy(ctx, market_id: int, side: str, amount: int):
             WHERE id=?
         """, (amount, amount, market_id))
 
-    c.execute("""
-        INSERT INTO trades (user_id, market_id, side, amount)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, market_id, side, amount))
-
-    c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
+       c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
     yes, no = c.fetchone()
 
     total = yes + no
+
     yes_p = 50 if total == 0 else round((yes / total) * 100, 1)
     no_p = round(100 - yes_p, 1)
 
+    trade_price = yes_p if side == "YES" else no_p
+
+    c.execute("""
+        INSERT INTO trades (user_id, market_id, side, amount, price)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, market_id, side, amount, trade_price))
+
     save_price(market_id, yes_p)
+
     conn.commit()
 
     await ctx.send(
@@ -754,15 +961,24 @@ def payout_market(market_id, result):
     total_win = sum(a for _, a in winners)
 
     if total_win == 0:
-        return
+        return 0
+
+    total_paid = 0
 
     for u, a in winners:
         share = a / total_win
         payout = int(a + share * losers_pool)
 
-        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (payout, u))
+        total_paid += payout
+
+        c.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id=?",
+            (payout, u)
+        )
 
     conn.commit()
+
+    return total_paid
 
 
 # =========================
@@ -775,10 +991,15 @@ async def resolve():
     while not bot.is_closed():
 
         try:
-            c.execute("SELECT id, match_key FROM markets WHERE active=1 AND resolved=0")
+            c.execute("""
+                SELECT id, question, match_key, channel_id
+                FROM markets
+                WHERE active=1 AND resolved=0
+            """)
+
             markets = c.fetchall()
 
-            for mid, mk in markets:
+            for mid, question, mk, channel_id in markets:
 
                 if not mk or not mk.startswith("MATCH_"):
                     continue
@@ -813,9 +1034,37 @@ async def resolve():
 
                 conn.commit()
 
-                payout_market(mid, final)
+                total_paid = payout_market(mid, final)
+
+                score = "N/D"
+                if res["home_goals"] is not None and res["away_goals"] is not None:
+                    score = f'{res["home_goals"]}-{res["away_goals"]}'
 
                 print(f"[CLOSED] {mid} -> {final}")
+
+                if channel_id:
+                    try:
+                        channel = bot.get_channel(int(channel_id))
+                    except:
+                        channel = None
+
+                    if channel:
+                        await channel.send(
+f"""🏁 MERCATO CHIUSO
+
+🆔 Mercato {mid}
+
+🏟️ {res["home"]} vs {res["away"]}
+⚽ Risultato finale: {score}
+
+❓ {question}
+
+✅ Esito mercato: {final}
+
+💰 Premi distribuiti: {total_paid} crediti
+🎉 Congratulazioni ai vincitori!
+"""
+                        )
 
         except Exception as e:
             print("ERR:", e)
