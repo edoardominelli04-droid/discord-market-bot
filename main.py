@@ -28,6 +28,7 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+bot.remove_command("help")
 
 # =========================
 # FOOTBALL-DATA.ORG
@@ -45,6 +46,12 @@ ALERT_THRESHOLD = 15.0
 REFERRAL_REWARD = 500
 REFERRAL_MIN_AGE_HOURS = 24
 INVITE_CACHE = {}
+
+# Limite anti-spam/anti-exploit: massimo 3 acquisti per utente per mercato.
+MAX_BUYS_PER_USER_MARKET = 3
+
+# Canale Discord dedicato agli annunci dei nuovi mercati.
+MARKET_CHANNEL_ID = 1522101664063029340
 
 COMPETITIONS = {
     "PL": "Premier League",
@@ -71,6 +78,24 @@ async def send_long(ctx, msg):
     for chunk in chunks:
         await ctx.send(chunk)
 
+
+
+def is_admin_member(member):
+    """Riconosce gli admin del bot tramite permessi Discord."""
+    perms = getattr(member, "guild_permissions", None)
+    return bool(perms and (perms.administrator or perms.manage_guild))
+
+
+def admin_only():
+    """Decoratore per comandi riservati agli admin/moderatori del server."""
+    async def predicate(ctx):
+        if is_admin_member(ctx.author):
+            return True
+
+        await ctx.send("⛔ Comando riservato agli admin.")
+        return False
+
+    return commands.check(predicate)
 
 def api_get(path, params=None):
     url = f"{BASE_URL}{path}"
@@ -1086,6 +1111,7 @@ async def referrals(ctx):
 # API TEST COMMANDS
 # =========================
 @bot.command()
+@admin_only()
 async def checkapi(ctx):
     if not FOOTBALL_DATA_TOKEN:
         await ctx.send("❌ FOOTBALL_DATA_TOKEN non trovata nelle variabili ambiente")
@@ -1124,6 +1150,7 @@ Esempi:
 
 
 @bot.command()
+@admin_only()
 async def testmatch(ctx, match_id: int):
     status_code, data = api_get(f"/matches/{match_id}")
 
@@ -1170,6 +1197,7 @@ async def testmatch(ctx, match_id: int):
 # AI MATCH PREDICTION
 # =========================
 @bot.command(aliases=["previsione", "pronostico"])
+@admin_only()
 async def predict(ctx, match_id: int):
     match, status_code, raw_data = get_match_details(match_id)
 
@@ -1366,6 +1394,7 @@ Esempio:
 
 
 @bot.command(aliases=["partite", "calendario"])
+@admin_only()
 async def fixtures(ctx, competition: str = "SA", days: int = 7):
     competition = competition.upper()
 
@@ -1433,6 +1462,7 @@ Esempio:
 # CREATE MARKET FROM FOOTBALL-DATA MATCH
 # =========================
 @bot.command(aliases=["creamercato"])
+@admin_only()
 async def creatematch(ctx, match_id: int, *, question):
     res = get_match_result(match_id)
 
@@ -1474,20 +1504,49 @@ Prova prima:
     market_id = c.lastrowid
     conn.commit()
 
+    # Risposta privata/operativa nel canale in cui l'admin ha creato il mercato.
     embed = discord.Embed(
         title="📊 Mercato creato",
         description=question,
         color=0x22c55e
     )
-    embed.add_field(name="🆔 ID Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
     embed.add_field(name="🆔 Match API", value=str(match_id), inline=True)
     embed.add_field(name="📡 Stato API", value=status, inline=True)
     embed.add_field(name="🏟️ Partita", value=f"{home} vs {away}", inline=False)
-    embed.add_field(name="🟢 YES", value="50%", inline=True)
-    embed.add_field(name="🔴 NO", value="50%", inline=True)
-    embed.set_footer(text="Usa !buy ID YES/NO importo oppure !compra ID YES/NO importo")
+    embed.set_footer(text="Mercato aperto correttamente.")
 
     await ctx.send(embed=embed)
+
+    # Annuncio pubblico nel canale dedicato ai mercati.
+    market_channel = bot.get_channel(MARKET_CHANNEL_ID)
+
+    if market_channel:
+        announcement = discord.Embed(
+            title="📣 Nuovo mercato disponibile!",
+            color=0x22c55e
+        )
+        announcement.add_field(
+            name="🏟️ Partita",
+            value=f"{home} vs {away}",
+            inline=False
+        )
+        announcement.add_field(
+            name="❓ Domanda",
+            value=question,
+            inline=False
+        )
+        announcement.add_field(
+            name="🆔 Mercato",
+            value=f"#{market_id}",
+            inline=False
+        )
+        announcement.set_footer(text="💡 Acquista le tue quote")
+
+        await market_channel.send(embed=announcement)
+    else:
+        print(f"[MARKET ANNOUNCEMENT] Canale {MARKET_CHANNEL_ID} non trovato.")
+
 
 # =========================
 # MARKETS VIEW
@@ -1714,46 +1773,39 @@ async def profile(ctx):
     rank_text = f"#{rank}" if rank else "N/D"
 
     color = 0x22c55e if open_profit >= 0 else 0xef4444
-
-    dashboard = make_profile_dashboard_image(
-        ctx.author,
-        balance,
-        net_worth,
-        xp,
-        trader_level,
-        xp_current,
-        xp_required,
-        accuracy,
-        current_streak,
-        rank
-    )
-
-    file = discord.File(dashboard, filename="profile_dashboard.png")
+    profit_emoji = "🟢" if open_profit >= 0 else "🔴"
 
     embed = discord.Embed(
         title=f"👤 Profilo di {ctx.author.display_name}",
-        description="Dashboard personale del trader",
+        description="Scheda personale del trader",
         color=color
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
+
     embed.add_field(name="⭐ Livello server", value=server_level, inline=True)
     embed.add_field(name="💹 Livello trader", value=f"Lv {trader_level}", inline=True)
-    embed.add_field(name="📈 XP trader", value=f"{xp_current}/{xp_required}", inline=True)
+    embed.add_field(name="🏆 Rank", value=rank_text, inline=True)
+
     embed.add_field(name="💰 Saldo", value=f"{balance}", inline=True)
     embed.add_field(name="💼 Patrimonio stimato", value=f"{net_worth:.0f}", inline=True)
-    embed.add_field(name="🏆 Rank", value=rank_text, inline=True)
+    embed.add_field(name="📈 XP trader", value=f"{xp_current}/{xp_required}", inline=True)
+
+    embed.add_field(name=f"{profit_emoji} Profitto aperto", value=f"{open_profit:+.0f} ({roi:+.1f}%)", inline=True)
+    embed.add_field(name="🟢 Posizioni aperte", value=str(open_positions), inline=True)
+    embed.add_field(name="📜 Trade totali", value=str(total_trades), inline=True)
+
+    embed.add_field(name="🎯 Accuracy", value=f"{accuracy:.1f}%", inline=True)
     embed.add_field(name="🔥 Streak attuale", value=str(current_streak), inline=True)
     embed.add_field(name="🥇 Miglior streak", value=str(best_streak), inline=True)
-    embed.add_field(name="🎯 Accuracy", value=f"{accuracy:.1f}%", inline=True)
+
     embed.add_field(name="🏆 Mercati vinti", value=str(won_markets), inline=True)
     embed.add_field(name="❌ Mercati persi", value=str(lost_markets), inline=True)
-    embed.add_field(name="📜 Trade totali", value=str(total_trades), inline=True)
-    embed.add_field(name="📊 Profitto aperto", value=f"{open_profit:+.0f} ({roi:+.1f}%)", inline=True)
-    embed.add_field(name="🟢 Posizioni aperte", value=str(open_positions), inline=True)
-    embed.set_image(url="attachment://profile_dashboard.png")
+    embed.add_field(name="📊 Mercati risolti", value=str(resolved_markets), inline=True)
+
     embed.set_footer(text="Comando disponibile anche come !profilo")
 
-    await ctx.send(embed=embed, file=file)
+    await ctx.send(embed=embed)
+
 
 # =========================
 # LEADERBOARD
@@ -1887,6 +1939,18 @@ async def buy(ctx, market_id: int, side: str, amount: int):
 
     if not m or m[0] == 0:
         await ctx.send("❌ Mercato chiuso")
+        return
+
+    c.execute("""
+        SELECT COUNT(*)
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+    """, (user_id, market_id))
+    buy_count = c.fetchone()[0] or 0
+
+    if buy_count >= MAX_BUYS_PER_USER_MARKET:
+        await ctx.send(f"❌ Hai già raggiunto il limite di {MAX_BUYS_PER_USER_MARKET} acquisti su questo mercato.")
         return
 
     bal = get_user(user_id)
@@ -2091,11 +2155,25 @@ async def sell(ctx, market_id: int, percent: str, side: str = None):
 @bot.command(aliases=["grafico"])
 async def chart(ctx, market_id: int):
     c.execute("""
+        SELECT m.question, m.yes_pool, m.no_pool, m.total_pool, m.active, m.resolved, m.result
+        FROM markets m
+        WHERE m.id=?
+    """, (market_id,))
+    market_row = c.fetchone()
+
+    if not market_row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    question, yes_pool, no_pool, total_pool, active, resolved, result = market_row
+    current_yes, current_no = market_probabilities(yes_pool, no_pool)
+
+    c.execute("""
         SELECT timestamp, yes_price
         FROM price_history
         WHERE market_id=?
         ORDER BY id ASC
-        LIMIT 60
+        LIMIT 80
     """, (market_id,))
 
     data = c.fetchall()
@@ -2105,61 +2183,371 @@ async def chart(ctx, market_id: int):
         return
 
     times = [d[0] for d in data]
-    yes_prices = [d[1] for d in data]
+    yes_prices = [float(d[1]) for d in data]
     no_prices = [100 - y for y in yes_prices]
-
     x = list(range(len(yes_prices)))
 
-    def smooth(arr, window=3):
+    def smooth(arr, window=4):
         if len(arr) < window:
             return arr
 
-        return [
-            sum(arr[max(0, i - window):i + 1]) / min(i + 1, window)
-            for i in range(len(arr))
-        ]
+        smoothed = []
+        for i in range(len(arr)):
+            start = max(0, i - window + 1)
+            chunk = arr[start:i + 1]
+            smoothed.append(sum(chunk) / len(chunk))
+        return smoothed
 
     yes_smooth = smooth(yes_prices)
     no_smooth = smooth(no_prices)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor("#0e1117")
-    ax.set_facecolor("#0e1117")
+    short_question = question if len(question) <= 90 else question[:87] + "..."
+    status_text = "ATTIVO" if active == 1 else f"CHIUSO ({result or 'N/D'})"
+    updated_at = datetime.utcnow().strftime("%H:%M UTC")
 
-    ax.plot(x, yes_smooth, label="YES", linewidth=2.5, color="#22c55e")
-    ax.plot(x, no_smooth, label="NO", linewidth=2.5, color="#ef4444")
+    fig = plt.figure(figsize=(11, 6), dpi=140)
+    fig.patch.set_facecolor("#0b0f19")
 
-    ax.axhline(50, linestyle="--", linewidth=1, alpha=0.3, color="white")
+    # Background card
+    ax_bg = fig.add_axes([0, 0, 1, 1])
+    ax_bg.axis("off")
+    ax_bg.set_facecolor("#0b0f19")
 
-    ax.fill_between(x, yes_smooth, alpha=0.10, color="#00ff88")
-    ax.fill_between(x, no_smooth, alpha=0.05, color="#ff4444")
+    ax_bg.text(0.05, 0.91, f"Andamento mercato #{market_id}", fontsize=22, fontweight="bold", color="white")
+    ax_bg.text(0.05, 0.855, short_question, fontsize=10.5, color="#9ca3af")
+    ax_bg.text(0.82, 0.91, status_text, fontsize=11, fontweight="bold", color="#facc15", ha="right")
 
-    ax.set_title("Market Probability", fontsize=15, fontweight="bold", color="white")
-    ax.set_ylabel("Probability (%)", color="white")
+    # Stat cards
+    ax_bg.text(0.055, 0.755, "YES", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.055, 0.695, f"{current_yes:.1f}%", fontsize=25, color="#22c55e", fontweight="bold")
+
+    ax_bg.text(0.245, 0.755, "NO", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.245, 0.695, f"{current_no:.1f}%", fontsize=25, color="#ef4444", fontweight="bold")
+
+    ax_bg.text(0.435, 0.755, "POOL", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.435, 0.695, f"{total_pool}", fontsize=25, color="white", fontweight="bold")
+
+    # Chart area
+    ax = fig.add_axes([0.07, 0.18, 0.86, 0.42])
+    ax.set_facecolor("#0b0f19")
+
+    ax.plot(x, yes_smooth, linewidth=3.2, color="#22c55e", label="YES")
+    ax.plot(x, no_smooth, linewidth=3.2, color="#ef4444", label="NO")
+
+    ax.fill_between(x, yes_smooth, 0, alpha=0.10, color="#22c55e")
+    ax.fill_between(x, no_smooth, 0, alpha=0.06, color="#ef4444")
+    ax.axhline(50, linestyle="--", linewidth=1, alpha=0.25, color="#9ca3af")
+
     ax.set_ylim(0, 100)
-
-    ax.grid(True, alpha=0.15)
+    ax.set_ylabel("Probabilità (%)", color="#9ca3af", fontsize=9)
+    ax.grid(True, alpha=0.12)
 
     step = max(1, len(x) // 6)
-    ax.set_xticks(range(0, len(x), step))
-    ax.set_xticklabels(
-        [times[i] for i in range(0, len(times), step)],
-        rotation=25,
-        color="white"
-    )
+    tick_positions = list(range(0, len(x), step))
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([times[i] for i in tick_positions], rotation=25, color="#9ca3af", fontsize=8)
 
-    ax.tick_params(colors="white")
-    ax.legend()
+    ax.tick_params(colors="#9ca3af", labelsize=8)
 
-    plt.tight_layout()
+    for spine in ax.spines.values():
+        spine.set_color("#1f2937")
+
+    legend = ax.legend(loc="upper left", frameon=True, fontsize=9)
+    legend.get_frame().set_facecolor("#111827")
+    legend.get_frame().set_edgecolor("#1f2937")
+
+    ax_bg.text(0.05, 0.08, f"Grafico aggiornato alle {updated_at}", fontsize=9, color="#6b7280")
+    ax_bg.text(0.74, 0.08, "Prediction Market Bot", fontsize=9, color="#6b7280", ha="right")
 
     buffer = io.BytesIO()
-    plt.savefig(buffer, format="png", facecolor="#0e1117")
+    plt.savefig(buffer, format="png", facecolor="#0b0f19", bbox_inches="tight", pad_inches=0.15)
     buffer.seek(0)
 
-    await ctx.send(file=discord.File(buffer, "market_chart.png"))
+    await ctx.send(file=discord.File(buffer, "market_dashboard.png"))
 
-    plt.close()
+    plt.close(fig)
+
+
+
+# =========================
+# ADMIN MARKET MANAGEMENT
+# =========================
+@bot.command(aliases=["chiudimercato"])
+@admin_only()
+async def closemarket(ctx, market_id: int):
+    """Chiude un mercato senza payout."""
+    c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
+    row = c.fetchone()
+
+    if not row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    _, question, active, resolved = row
+
+    if active == 0:
+        await ctx.send("⚠️ Mercato già chiuso")
+        return
+
+    c.execute("""
+        UPDATE markets
+        SET active=0,
+            resolved=0,
+            result='CLOSED'
+        WHERE id=?
+    """, (market_id,))
+    conn.commit()
+
+    embed = discord.Embed(
+        title="🔒 Mercato chiuso manualmente",
+        description=question,
+        color=0xf59e0b
+    )
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.set_footer(text="Nessun payout distribuito. Usa !cancelmarket per rimborsare oppure !resolve per risolvere.")
+    await ctx.send(embed=embed)
+
+
+@bot.command(aliases=["annullamercato"])
+@admin_only()
+async def cancelmarket(ctx, market_id: int):
+    """Annulla un mercato e rimborsa le posizioni aperte."""
+    c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
+    row = c.fetchone()
+
+    if not row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    _, question, active, resolved = row
+
+    c.execute("""
+        SELECT user_id, SUM(amount)
+        FROM trades
+        WHERE market_id=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+        GROUP BY user_id
+    """, (market_id,))
+    refunds = c.fetchall()
+
+    total_refund = 0
+    for user_id, amount in refunds:
+        amount = int(amount or 0)
+        if amount <= 0:
+            continue
+        total_refund += amount
+        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+        record_wealth_snapshot(user_id)
+
+    c.execute("""
+        UPDATE trades
+        SET closed=1
+        WHERE market_id=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+    """, (market_id,))
+
+    c.execute("""
+        UPDATE markets
+        SET active=0,
+            resolved=1,
+            result='CANCELLED'
+        WHERE id=?
+    """, (market_id,))
+    conn.commit()
+
+    embed = discord.Embed(
+        title="🚫 Mercato annullato",
+        description=question,
+        color=0xef4444
+    )
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="💸 Rimborsi totali", value=f"{total_refund} crediti", inline=True)
+    embed.set_footer(text="Le posizioni aperte sono state chiuse e rimborsate.")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="resolve", aliases=["risolvi"])
+@admin_only()
+async def resolve_market_command(ctx, market_id: int, result: str):
+    """Risolve manualmente un mercato con YES o NO e distribuisce il payout."""
+    result = result.upper()
+
+    if result not in ["YES", "NO"]:
+        await ctx.send("❌ Risultato non valido. Usa YES o NO.")
+        return
+
+    c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
+    row = c.fetchone()
+
+    if not row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    _, question, active, resolved = row
+
+    if resolved == 1:
+        await ctx.send("⚠️ Mercato già risolto")
+        return
+
+    c.execute("""
+        UPDATE markets
+        SET active=0,
+            resolved=1,
+            result=?
+        WHERE id=?
+    """, (result, market_id))
+    conn.commit()
+
+    update_streaks_for_market(market_id, result)
+    total_paid = payout_market(market_id, result)
+
+    embed = discord.Embed(
+        title="🏁 Mercato risolto manualmente",
+        description=question,
+        color=0x22c55e if result == "YES" else 0xef4444
+    )
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="✅ Esito", value=result, inline=True)
+    embed.add_field(name="💰 Premi distribuiti", value=f"{total_paid} crediti", inline=True)
+    await ctx.send(embed=embed)
+
+
+@bot.command(aliases=["aggiungisaldo"])
+@admin_only()
+async def addbalance(ctx, member: discord.Member, amount: int):
+    if amount <= 0:
+        await ctx.send("❌ Importo non valido")
+        return
+
+    user_id = str(member.id)
+    get_user(user_id)
+    c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    await ctx.send(f"✅ Aggiunti **{amount}** crediti a {member.mention}.")
+
+
+@bot.command(aliases=["rimuovisaldo"])
+@admin_only()
+async def removebalance(ctx, member: discord.Member, amount: int):
+    if amount <= 0:
+        await ctx.send("❌ Importo non valido")
+        return
+
+    user_id = str(member.id)
+    get_user(user_id)
+    c.execute("UPDATE users SET balance = MAX(balance - ?, 0) WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    await ctx.send(f"✅ Rimossi fino a **{amount}** crediti da {member.mention}.")
+
+
+@bot.command(aliases=["resetutente"])
+@admin_only()
+async def resetuser(ctx, member: discord.Member):
+    user_id = str(member.id)
+    c.execute("INSERT OR REPLACE INTO users (user_id, balance) VALUES (?, ?)", (user_id, 1000))
+    c.execute("""
+        INSERT OR REPLACE INTO user_stats (user_id, xp, current_streak, best_streak, last_daily)
+        VALUES (?, 0, 0, 0, NULL)
+    """, (user_id,))
+    c.execute("UPDATE trades SET amount=0, closed=1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    await ctx.send(f"🔄 Utente {member.mention} resettato a **1000 crediti**.")
+
+
+# =========================
+# HELP COMMANDS
+# =========================
+@bot.command(name="help", aliases=["aiuto"])
+async def help_command(ctx, section: str = None):
+    if section and section.lower() == "admin":
+        if not is_admin_member(ctx.author):
+            await ctx.send("⛔ La guida admin è riservata agli admin.")
+            return
+
+        embed = discord.Embed(
+            title="🛠️ Help Admin",
+            description="Comandi riservati alla gestione del bot e dei mercati.",
+            color=0xf59e0b
+        )
+        embed.add_field(
+            name="📊 Mercati",
+            value=(
+                "`!creatematch ID domanda` / `!creamercato`\n"
+                "`!closemarket ID` / `!chiudimercato`\n"
+                "`!cancelmarket ID` / `!annullamercato`\n"
+                "`!resolve ID YES/NO` / `!risolvi`\n"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="⚽ API e analisi",
+            value=(
+                "`!fixtures COMPETIZIONE giorni` / `!partite`\n"
+                "`!predict MATCH_ID` / `!previsione`\n"
+                "`!checkapi`\n"
+                "`!testmatch MATCH_ID`"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="💰 Utenti",
+            value=(
+                "`!addbalance @utente importo`\n"
+                "`!removebalance @utente importo`\n"
+                "`!resetuser @utente`"
+            ),
+            inline=False
+        )
+        await ctx.send(embed=embed)
+        return
+
+    embed = discord.Embed(
+        title="📘 Help",
+        description="Comandi disponibili per usare il prediction market.",
+        color=0x2563eb
+    )
+    embed.add_field(
+        name="💰 Account",
+        value=(
+            "`!balance` / `!saldo`\n"
+            "`!daily` / `!giornaliero`\n"
+            "`!profile` / `!profilo`\n"
+            "`!portfolio` / `!portafoglio`\n"
+            "`!leaderboard` / `!classifica`"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="📊 Mercati",
+        value=(
+            "`!markets` / `!mercati`\n"
+            "`!market ID` / `!mercato ID`\n"
+            "`!buy ID YES/NO importo` / `!compra`\n"
+            "`!sell ID percentuale [YES/NO]` / `!vendi`\n"
+            "`!chart ID` / `!grafico`"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="⚽ Info",
+        value=(
+            "`!competitions` / `!competizioni`\n"
+            "`!today COMPETIZIONE` / `!oggi`\n"
+            "`!live` / `!diretta`\n"
+            "`!referrals` / `!inviti`"
+        ),
+        inline=False
+    )
+    embed.set_footer(text="Admin: usa !help admin")
+    await ctx.send(embed=embed)
 
 
 # =========================
@@ -2274,7 +2662,7 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
 # =========================
 # RESOLVER LOOP
 # =========================
-async def resolve():
+async def resolver_loop():
     await bot.wait_until_ready()
 
     while not bot.is_closed():
@@ -2424,7 +2812,7 @@ async def on_member_join(member):
 async def on_ready():
     print(f"Bot online {bot.user}")
     await cache_all_invites()
-    bot.loop.create_task(resolve())
+    bot.loop.create_task(resolver_loop())
     bot.loop.create_task(referral_checker())
 
 
