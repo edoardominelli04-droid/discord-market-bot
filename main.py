@@ -3022,14 +3022,26 @@ async def closemarket(ctx, market_id: int):
     """, (market_id,))
     conn.commit()
 
+    result_channel = bot.get_channel(RESULTS_CHANNEL_ID)
     embed = discord.Embed(
         title="🔒 Mercato chiuso manualmente",
         description=question,
-        color=COLOR_ORANGE
+        color=COLOR_RESOLVED
     )
-    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
-    embed.set_footer(text="Nessun payout distribuito. Usa !cancelmarket per rimborsare oppure !resolve per risolvere.")
-    await ctx.send(embed=embed)
+    embed.add_field(name="🏟️ Partita / Evento", value="Mercato chiuso manualmente", inline=False)
+    embed.add_field(name="⚽ Risultato finale", value="N/D", inline=True)
+    embed.add_field(name="🏆 Vincitore", value="Nessun vincitore", inline=True)
+    embed.add_field(name="🎯 Esito mercato", value="⚪ CHIUSO", inline=True)
+    embed.add_field(name="💰 Payout", value=f"Mercato #{market_id} chiuso • Nessun payout distribuito", inline=False)
+    embed.set_footer(text="Mercato chiuso manualmente. Grazie per aver giocato!")
+
+    if result_channel:
+        await result_channel.send(embed=embed)
+        await ctx.send(f"✅ Mercato #{market_id} chiuso e pubblicato nel canale risultati.")
+    else:
+        await ctx.send("⚠️ Canale risultati non trovato. Pubblico qui il riepilogo.", embed=embed)
+        print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
+
     await log_admin_activity(
         ctx,
         "🔒 !closemarket",
@@ -3044,14 +3056,14 @@ async def closemarket(ctx, market_id: int):
 async def cancelmarket(ctx, market_id: int):
     await delete_admin_command_message(ctx)
     """Annulla un mercato e rimborsa le posizioni aperte."""
-    c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
+    c.execute("SELECT id, question, active, resolved, match_key FROM markets WHERE id=?", (market_id,))
     row = c.fetchone()
 
     if not row:
         await ctx.send("❌ Mercato non trovato")
         return
 
-    _, question, active, resolved = row
+    _, question, active, resolved, match_key = row
 
     c.execute("""
         SELECT user_id, SUM(amount)
@@ -3118,14 +3130,14 @@ async def resolve_market_command(ctx, market_id: int, result: str):
         await ctx.send("❌ Risultato non valido. Usa YES o NO.")
         return
 
-    c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
+    c.execute("SELECT id, question, active, resolved, match_key FROM markets WHERE id=?", (market_id,))
     row = c.fetchone()
 
     if not row:
         await ctx.send("❌ Mercato non trovato")
         return
 
-    _, question, active, resolved = row
+    _, question, active, resolved, match_key = row
 
     if resolved == 1:
         await ctx.send("⚠️ Mercato già risolto")
@@ -3147,55 +3159,47 @@ async def resolve_market_command(ctx, market_id: int, result: str):
     for (affected_user_id,) in c.fetchall():
         await evaluate_user_badges(affected_user_id, notify=True)
 
-    embed = discord.Embed(
-        title="🏁 Mercato risolto manualmente",
+    outcome_icon = "🟢 YES" if result == "YES" else "🔴 NO"
+    partita_text = "Evento speciale / mercato manuale"
+    score_text = "Risoluzione manuale"
+    winner_text = "N/D"
+
+    if match_key and str(match_key).startswith("MATCH_"):
+        try:
+            match_api_id = str(match_key).replace("MATCH_", "")
+            res = get_match_result(match_api_id)
+            if res:
+                partita_text = f'{res["home"]} vs {res["away"]}'
+                if res["home_goals"] is not None and res["away_goals"] is not None:
+                    score_text = f'{res["home_goals"]}-{res["away_goals"]}'
+                winner_api = res.get("winner")
+                if winner_api == "HOME":
+                    winner_text = res["home"]
+                elif winner_api == "AWAY":
+                    winner_text = res["away"]
+                elif winner_api == "DRAW":
+                    winner_text = "Pareggio"
+        except Exception as e:
+            print(f"[RESULTS CHANNEL MANUAL] Errore recupero match: {e}")
+
+    result_embed = discord.Embed(
+        title="🏁 Mercato risolto",
         description=question,
         color=COLOR_RESOLVED
     )
-    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
-    embed.add_field(name="✅ Esito", value=result, inline=True)
-    embed.add_field(name="💰 Premi distribuiti", value=f"{total_paid} crediti", inline=True)
-    await ctx.send(embed=embed)
+    result_embed.add_field(name="🏟️ Partita", value=partita_text, inline=False)
+    result_embed.add_field(name="⚽ Risultato finale", value=score_text, inline=True)
+    result_embed.add_field(name="🏆 Vincitore", value=winner_text, inline=True)
+    result_embed.add_field(name="🎯 Esito mercato", value=outcome_icon, inline=True)
+    result_embed.add_field(name="💰 Payout", value=f"Mercato #{market_id} risolto • {total_paid} crediti distribuiti", inline=False)
+    result_embed.set_footer(text="Grazie per aver giocato!")
 
     result_channel = bot.get_channel(RESULTS_CHANNEL_ID)
     if result_channel:
-        outcome_icon = "🟢 YES" if result == "YES" else "🔴 NO"
-        partita_text = "Evento speciale / mercato manuale"
-        score_text = "Risoluzione manuale"
-        winner_text = "N/D"
-
-        if match_key and str(match_key).startswith("MATCH_"):
-            try:
-                match_api_id = str(match_key).replace("MATCH_", "")
-                res = get_match_result(match_api_id)
-                if res:
-                    partita_text = f'{res["home"]} vs {res["away"]}'
-                    if res["home_goals"] is not None and res["away_goals"] is not None:
-                        score_text = f'{res["home_goals"]}-{res["away_goals"]}'
-                    winner_api = res.get("winner")
-                    if winner_api == "HOME":
-                        winner_text = res["home"]
-                    elif winner_api == "AWAY":
-                        winner_text = res["away"]
-                    elif winner_api == "DRAW":
-                        winner_text = "Pareggio"
-            except Exception as e:
-                print(f"[RESULTS CHANNEL MANUAL] Errore recupero match: {e}")
-
-        result_embed = discord.Embed(
-            title="🏁 Mercato risolto",
-            description=question,
-            color=COLOR_RESOLVED
-        )
-        result_embed.add_field(name="🏟️ Partita", value=partita_text, inline=False)
-        result_embed.add_field(name="⚽ Risultato finale", value=score_text, inline=True)
-        result_embed.add_field(name="🏆 Vincitore", value=winner_text, inline=True)
-        result_embed.add_field(name="🎯 Esito mercato", value=outcome_icon, inline=True)
-        result_embed.add_field(name="💰 Payout", value=f"Mercato #{market_id} risolto • {total_paid} crediti distribuiti", inline=False)
-        result_embed.set_footer(text="Grazie per aver giocato!")
-
         await result_channel.send(embed=result_embed)
+        await ctx.send(f"✅ Mercato #{market_id} risolto e pubblicato nel canale risultati.")
     else:
+        await ctx.send("⚠️ Canale risultati non trovato. Pubblico qui il riepilogo.", embed=result_embed)
         print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
 
     await log_admin_activity(
