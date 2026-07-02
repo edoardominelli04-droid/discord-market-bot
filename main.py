@@ -64,7 +64,7 @@ MARKET_ROLE_ID = 1522125298345447546
 PUBLIC_CALENDAR_CHANNEL_ID = 1522149843663982753
 ADMIN_CALENDAR_CHANNEL_ID = 1522150991112310874
 CALENDAR_POST_HOUR = 11
-CALENDAR_POST_MINUTE = 0
+CALENDAR_POST_MINUTE = 30
 LAST_CALENDAR_POST_DATE = None
 
 SPECIAL_EVENT_CATEGORIES = {
@@ -842,8 +842,23 @@ def get_today_matches_for_competition(competition_code, target_date):
     return data.get("matches", []) or []
 
 
-def build_calendar_embeds(public=True):
-    today = get_rome_now().date()
+def get_today_matches_by_competition(target_date=None):
+    """Recupera una sola volta le partite del giorno per pubblico e admin.
+
+    Così il calendario pubblico e quello admin usano esattamente gli stessi dati:
+    il pubblico li mostra senza ID, l'admin li mostra con Match ID e comando pronto.
+    """
+    if target_date is None:
+        target_date = get_rome_now().date()
+
+    result = {}
+    for code in COMPETITIONS.keys():
+        result[code] = get_today_matches_for_competition(code, target_date)
+
+    return result
+
+
+def build_calendar_embed_from_matches(matches_by_competition, public=True):
     title = "📅 Partite di oggi" if public else "👑 Calendario admin"
     description = "Calendario pubblico senza ID partita." if public else "Calendario operativo con Match ID per creare mercati."
     embed = discord.Embed(title=title, description=description, color=0x2563eb if public else 0xf59e0b)
@@ -852,7 +867,7 @@ def build_calendar_embeds(public=True):
     field_count = 0
 
     for code, name in COMPETITIONS.items():
-        matches = get_today_matches_for_competition(code, today)
+        matches = matches_by_competition.get(code, [])
         if not matches:
             continue
 
@@ -868,7 +883,10 @@ def build_calendar_embeds(public=True):
             time_str = format_match_time_rome(m.get("utcDate"))
 
             if public:
-                lines.append(f"**{home}** vs **{away}\n🕒 {time_str} | 📡 {status}")
+                lines.append(
+                    f"**{home}** vs **{away}**\n"
+                    f"🕒 {time_str} | 📡 {status}"
+                )
             else:
                 lines.append(
                     f"**{home}** vs **{away}**\n"
@@ -893,19 +911,25 @@ def build_calendar_embeds(public=True):
     return embed
 
 
+def build_calendar_embeds(public=True):
+    matches_by_competition = get_today_matches_by_competition()
+    return build_calendar_embed_from_matches(matches_by_competition, public=public)
+
+
 async def post_daily_calendars():
     public_channel = bot.get_channel(PUBLIC_CALENDAR_CHANNEL_ID)
     admin_channel = bot.get_channel(ADMIN_CALENDAR_CHANNEL_ID)
+    matches_by_competition = get_today_matches_by_competition()
 
     if public_channel:
         try:
-            await public_channel.send(embed=build_calendar_embeds(public=True))
+            await public_channel.send(embed=build_calendar_embed_from_matches(matches_by_competition, public=True))
         except Exception as e:
             print(f"[CALENDAR PUBLIC] Errore invio: {e}")
 
     if admin_channel:
         try:
-            await admin_channel.send(embed=build_calendar_embeds(public=False))
+            await admin_channel.send(embed=build_calendar_embed_from_matches(matches_by_competition, public=False))
         except Exception as e:
             print(f"[CALENDAR ADMIN] Errore invio: {e}")
 
@@ -1991,6 +2015,7 @@ Prova prima:
 @bot.command(aliases=["creaevento"])
 @admin_only()
 async def createevent(ctx, category: str, *, question):
+    await delete_admin_command_message(ctx)
     category_key = category.lower().strip()
 
     if category_key not in SPECIAL_EVENT_CATEGORIES:
@@ -2029,25 +2054,6 @@ async def createevent(ctx, category: str, *, question):
     embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
     embed.set_footer(text="Il mercato dovrà essere risolto manualmente con !resolve ID YES/NO")
     await ctx.send(embed=embed)
-
-    market_channel = bot.get_channel(MARKET_CHANNEL_ID)
-    if market_channel:
-        announcement = discord.Embed(
-            title="📣 Nuovo mercato disponibile!",
-            color=0x8b5cf6
-        )
-        announcement.add_field(name="🎲 Evento Speciale", value=category_label, inline=False)
-        announcement.add_field(name="❓ Domanda", value=question, inline=False)
-        announcement.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=False)
-        announcement.set_footer(text="💡 Acquista le tue quote")
-        await market_channel.send(embed=announcement)
-        try:
-            await market_channel.send(
-                content=f"<@&{MARKET_ROLE_ID}>",
-                allowed_mentions=discord.AllowedMentions(roles=True)
-            )
-        except Exception as e:
-            print(f"[EVENT ROLE PING] Impossibile pingare il ruolo {MARKET_ROLE_ID}: {e}")
 
 
 # =========================
@@ -3103,6 +3109,14 @@ async def help_command(ctx, section: str = None):
                 "`!cancelmarket ID` / `!annullamercato`\n"
                 "`!resolve ID YES/NO` / `!risolvi`\n"
                 "`!createevent categoria domanda` / `!creaevento`"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🎲 Eventi speciali",
+            value=(
+                "Categorie: `politica`, `f1`, `musica`, `cinema`, `sport`, `geopolitica`, `economia`, `gaming`, `tv`, `attualita`\n"
+                "Gli eventi non vengono pubblicati nel canale annunci e vanno risolti manualmente."
             ),
             inline=False
         )
