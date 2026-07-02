@@ -53,6 +53,9 @@ MAX_BUYS_PER_USER_MARKET = 3
 # Canale Discord dedicato agli annunci dei nuovi mercati.
 MARKET_CHANNEL_ID = 1522101664063029340
 
+# Ruolo Discord da pingare quando viene pubblicato un nuovo mercato.
+MARKET_ROLE_ID = 1522125298345447546
+
 COMPETITIONS = {
     "PL": "Premier League",
     "SA": "Serie A",
@@ -96,6 +99,13 @@ def admin_only():
         return False
 
     return commands.check(predicate)
+
+async def delete_admin_command_message(ctx):
+    """Elimina il messaggio comando degli admin quando il bot ha i permessi necessari."""
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
 
 def api_get(path, params=None):
     url = f"{BASE_URL}{path}"
@@ -799,7 +809,7 @@ def analyze_team_form(matches, team_id):
             form.append("✅")
         elif gf == ga:
             draws += 1
-            form.append("➖")
+            form.append("⚪️")
         else:
             losses += 1
             form.append("❌")
@@ -1199,6 +1209,7 @@ async def testmatch(ctx, match_id: int):
 @bot.command(aliases=["previsione", "pronostico"])
 @admin_only()
 async def predict(ctx, match_id: int):
+    await delete_admin_command_message(ctx)
     match, status_code, raw_data = get_match_details(match_id)
 
     if not match:
@@ -1464,6 +1475,7 @@ Esempio:
 @bot.command(aliases=["creamercato"])
 @admin_only()
 async def creatematch(ctx, match_id: int, *, question):
+    await delete_admin_command_message(ctx)
     res = get_match_result(match_id)
 
     if not res:
@@ -1544,6 +1556,10 @@ Prova prima:
         announcement.set_footer(text="💡 Acquista le tue quote")
 
         await market_channel.send(embed=announcement)
+        try:
+            await market_channel.send(f"<@&{MARKET_ROLE_ID}>")
+        except Exception as e:
+            print(f"[MARKET ROLE PING] Impossibile pingare il ruolo {MARKET_ROLE_ID}: {e}")
     else:
         print(f"[MARKET ANNOUNCEMENT] Canale {MARKET_CHANNEL_ID} non trovato.")
 
@@ -2213,7 +2229,7 @@ async def chart(ctx, market_id: int):
     ax_bg.axis("off")
     ax_bg.set_facecolor("#0b0f19")
 
-    ax_bg.text(0.05, 0.91, f"Andamento mercato #{market_id}", fontsize=22, fontweight="bold", color="white")
+    ax_bg.text(0.05, 0.91, f"Andamento mercato #{market_id}", fontsize=24, fontweight="bold", fontfamily="Liberation Sans", color="white")
     ax_bg.text(0.05, 0.855, short_question, fontsize=10.5, color="#9ca3af")
     ax_bg.text(0.82, 0.91, status_text, fontsize=11, fontweight="bold", color="#facc15", ha="right")
 
@@ -2275,6 +2291,7 @@ async def chart(ctx, market_id: int):
 @bot.command(aliases=["chiudimercato"])
 @admin_only()
 async def closemarket(ctx, market_id: int):
+    await delete_admin_command_message(ctx)
     """Chiude un mercato senza payout."""
     c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
     row = c.fetchone()
@@ -2311,6 +2328,7 @@ async def closemarket(ctx, market_id: int):
 @bot.command(aliases=["annullamercato"])
 @admin_only()
 async def cancelmarket(ctx, market_id: int):
+    await delete_admin_command_message(ctx)
     """Annulla un mercato e rimborsa le posizioni aperte."""
     c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
     row = c.fetchone()
@@ -2371,6 +2389,7 @@ async def cancelmarket(ctx, market_id: int):
 @bot.command(name="resolve", aliases=["risolvi"])
 @admin_only()
 async def resolve_market_command(ctx, market_id: int, result: str):
+    await delete_admin_command_message(ctx)
     """Risolve manualmente un mercato con YES o NO e distribuisce il payout."""
     result = result.upper()
 
@@ -2546,7 +2565,6 @@ async def help_command(ctx, section: str = None):
         ),
         inline=False
     )
-    embed.set_footer(text="Admin: usa !help admin")
     await ctx.send(embed=embed)
 
 
