@@ -18,6 +18,13 @@ except Exception:
     ZoneInfo = None
 from discord.ext import commands
 
+try:
+    from scipy.interpolate import make_interp_spline
+except Exception:
+    make_interp_spline = None
+
+import numpy as np
+
 
 # =========================
 # TOKEN
@@ -63,9 +70,28 @@ MARKET_ROLE_ID = 1522125298345447546
 # Canali dedicati al calendario automatico giornaliero.
 PUBLIC_CALENDAR_CHANNEL_ID = 1522149843663982753
 ADMIN_CALENDAR_CHANNEL_ID = 1522150991112310874
-CALENDAR_POST_HOUR = 11
-CALENDAR_POST_MINUTE = 30
+CALENDAR_POST_HOUR = 8
+CALENDAR_POST_MINUTE = 0
 LAST_CALENDAR_POST_DATE = None
+
+# Canale dedicato ai risultati dei mercati risolti automaticamente.
+RESULTS_CHANNEL_ID = 1522189230128762971
+
+# Canale dedicato al registro delle attività admin.
+ACTIVITY_LOG_CHANNEL_ID = 1522190483713953813
+
+# Palette colori embed v1.9.2
+COLOR_BLUE = 0x2563eb          # Profilo, Portafoglio, Balance, Leaderboard
+COLOR_PURPLE = 0x8b5cf6        # Mercati, Nuovo Mercato, Nuovo Evento
+COLOR_PINK = 0xec4899          # Buy, Sell
+COLOR_ORANGE = 0xf59e0b        # AI Prediction, Chart
+COLOR_CYAN = 0x38bdf8          # Calendario
+COLOR_GREEN = 0x22c55e         # YES / risolto positivo
+COLOR_RED = 0xef4444           # NO / Help / errori
+COLOR_WHITE = 0xf8fafc         # Comandi Admin
+COLOR_GOLD = 0xfacc15          # Daily, Referral
+COLOR_DARK_PINK = 0xbe185d     # Follow
+COLOR_RESOLVED = 0xe5e7eb      # Mercato risolto neutro
 
 SPECIAL_EVENT_CATEGORIES = {
     "politica": "🗳️ Politica / Elezioni",
@@ -149,6 +175,38 @@ async def delete_admin_command_message(ctx):
         print(f"[ADMIN DELETE] Impossibile eliminare il comando admin: {e}")
     except Exception as e:
         print(f"[ADMIN DELETE] Errore inatteso: {e}")
+
+async def log_admin_activity(ctx, action, market_id=None, details=None, color=COLOR_WHITE):
+    """Invia un log operativo nel canale Registro Attività."""
+    channel = bot.get_channel(ACTIVITY_LOG_CHANNEL_ID)
+    if not channel:
+        print(f"[ACTIVITY LOG] Canale {ACTIVITY_LOG_CHANNEL_ID} non trovato.")
+        return
+
+    now = get_rome_now().strftime("%d/%m/%Y %H:%M:%S") if "get_rome_now" in globals() else datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S UTC")
+
+    embed = discord.Embed(
+        title="📜 Registro Attività",
+        color=color,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="📄 Operazione", value=action, inline=False)
+    embed.add_field(name="👤 Admin", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
+    embed.add_field(name="🕒 Data e ora", value=now, inline=True)
+
+    if market_id is not None:
+        embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
+
+    if details:
+        embed.add_field(name="📄 Dettagli", value=str(details)[:1000], inline=False)
+
+    embed.set_footer(text="Registro automatico v1.9.2")
+
+    try:
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"[ACTIVITY LOG] Errore invio log: {e}")
+
 
 def api_get(path, params=None):
     url = f"{BASE_URL}{path}"
@@ -253,7 +311,7 @@ def safe_entry_price(entry_price, fallback_price):
 # =========================
 # DATABASE
 # =========================
-conn = sqlite3.connect("/data/bot.db", check_same_thread=False)
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
@@ -861,7 +919,7 @@ def get_today_matches_by_competition(target_date=None):
 def build_calendar_embed_from_matches(matches_by_competition, public=True):
     title = "📅 Partite di oggi" if public else "👑 Calendario admin"
     description = "Calendario pubblico senza ID partita." if public else "Calendario operativo con Match ID per creare mercati."
-    embed = discord.Embed(title=title, description=description, color=0x2563eb if public else 0xf59e0b)
+    embed = discord.Embed(title=title, description=description, color=COLOR_CYAN if public else COLOR_WHITE)
 
     found = False
     field_count = 0
@@ -1457,7 +1515,7 @@ async def balance(ctx):
 
     embed = discord.Embed(
         title="💰 Saldo",
-        color=0x22c55e
+        color=COLOR_BLUE
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="Crediti disponibili", value=f"{bal}", inline=False)
@@ -1505,7 +1563,7 @@ async def daily(ctx):
     embed = discord.Embed(
         title="🎁 Daily riscattato",
         description=f"Hai ricevuto **+{reward} crediti** e **+{xp_reward} XP trader**.",
-        color=0x22c55e
+        color=COLOR_GOLD
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="💰 Saldo aggiornato", value=str(balance), inline=True)
@@ -1546,7 +1604,7 @@ async def referrals(ctx):
             f"Invita un amico nel server: ricevi **+{REFERRAL_REWARD} crediti** quando resta almeno "
             f"**{REFERRAL_MIN_AGE_HOURS}h** e fa almeno **1 trade**."
         ),
-        color=0x22c55e
+        color=COLOR_GOLD
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="✅ Premi riscossi", value=str(rewarded), inline=True)
@@ -1971,6 +2029,13 @@ Prova prima:
     embed.set_footer(text="Mercato aperto correttamente.")
 
     await ctx.send(embed=embed)
+    await log_admin_activity(
+        ctx,
+        "🟣 !creatematch",
+        market_id=market_id,
+        details=f"Match API {match_id} • {home} vs {away} • {question}",
+        color=COLOR_PURPLE
+    )
 
     # Annuncio pubblico nel canale dedicato ai mercati.
     market_channel = bot.get_channel(MARKET_CHANNEL_ID)
@@ -2048,12 +2113,19 @@ async def createevent(ctx, category: str, *, question):
     embed = discord.Embed(
         title="🎲 Evento Speciale creato",
         description=question,
-        color=0x8b5cf6
+        color=COLOR_PURPLE
     )
     embed.add_field(name="🏷️ Categoria", value=category_label, inline=False)
     embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
     embed.set_footer(text="Il mercato dovrà essere risolto manualmente con !resolve ID YES/NO")
     await ctx.send(embed=embed)
+    await log_admin_activity(
+        ctx,
+        "🎲 !createevent",
+        market_id=market_id,
+        details=f"Categoria {category_label} • {question}",
+        color=COLOR_PURPLE
+    )
 
 
 # =========================
@@ -2071,7 +2143,7 @@ async def markets(ctx):
     embed = discord.Embed(
         title="📊 Mercati attivi",
         description=f"Mercati disponibili: {len(rows)}",
-        color=0x2563eb
+        color=COLOR_PURPLE
     )
 
     for mid, q, yes, no in rows[:10]:
@@ -2804,7 +2876,12 @@ async def chart(ctx, market_id: int):
     no_prices = [100 - y for y in yes_prices]
     x = list(range(len(yes_prices)))
 
-    def smooth(arr, window=4):
+    opening_yes = yes_prices[0]
+    price_change = current_yes - opening_yes
+    direction_icon = "📈" if price_change > 0 else "📉" if price_change < 0 else "➖"
+    change_color = "#22c55e" if price_change > 0 else "#ef4444" if price_change < 0 else "#e5e7eb"
+
+    def moving_average(arr, window=4):
         if len(arr) < window:
             return arr
 
@@ -2815,8 +2892,30 @@ async def chart(ctx, market_id: int):
             smoothed.append(sum(chunk) / len(chunk))
         return smoothed
 
-    yes_smooth = smooth(yes_prices)
-    no_smooth = smooth(no_prices)
+    yes_smooth = moving_average(yes_prices)
+    no_smooth = moving_average(no_prices)
+
+    # Curve ondulate: moving average + spline, con fallback lineare se scipy non è disponibile.
+    x_plot = np.array(x, dtype=float)
+    yes_plot = np.array(yes_smooth, dtype=float)
+    no_plot = np.array(no_smooth, dtype=float)
+
+    if make_interp_spline and len(x_plot) >= 4:
+        x_curve = np.linspace(x_plot.min(), x_plot.max(), 240)
+        spline_k = min(3, len(x_plot) - 1)
+        try:
+            yes_curve = make_interp_spline(x_plot, yes_plot, k=spline_k)(x_curve)
+            no_curve = make_interp_spline(x_plot, no_plot, k=spline_k)(x_curve)
+            yes_curve = np.clip(yes_curve, 0, 100)
+            no_curve = np.clip(no_curve, 0, 100)
+        except Exception:
+            x_curve = x_plot
+            yes_curve = yes_plot
+            no_curve = no_plot
+    else:
+        x_curve = x_plot
+        yes_curve = yes_plot
+        no_curve = no_plot
 
     short_question = question if len(question) <= 90 else question[:87] + "..."
     status_text = "ATTIVO" if active == 1 else f"CHIUSO ({result or 'N/D'})"
@@ -2844,16 +2943,22 @@ async def chart(ctx, market_id: int):
     ax_bg.text(0.435, 0.755, "POOL", fontsize=10, color="#9ca3af", fontweight="bold")
     ax_bg.text(0.435, 0.695, f"{total_pool}", fontsize=25, color="white", fontweight="bold")
 
+    ax_bg.text(0.625, 0.755, "VAR. APERTURA", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.625, 0.695, f"{direction_icon} {price_change:+.1f}%", fontsize=25, color=change_color, fontweight="bold")
+
     # Chart area
     ax = fig.add_axes([0.07, 0.18, 0.86, 0.42])
     ax.set_facecolor("#0b0f19")
 
-    ax.plot(x, yes_smooth, linewidth=3.2, color="#22c55e", label="YES")
-    ax.plot(x, no_smooth, linewidth=3.2, color="#ef4444", label="NO")
+    ax.plot(x_curve, yes_curve, linewidth=3.2, color="#22c55e", label="YES")
+    ax.plot(x_curve, no_curve, linewidth=3.2, color="#ef4444", label="NO")
 
-    ax.fill_between(x, yes_smooth, 0, alpha=0.10, color="#22c55e")
-    ax.fill_between(x, no_smooth, 0, alpha=0.06, color="#ef4444")
+    ax.fill_between(x_curve, yes_curve, 0, alpha=0.10, color="#22c55e")
+    ax.fill_between(x_curve, no_curve, 0, alpha=0.06, color="#ef4444")
     ax.axhline(50, linestyle="--", linewidth=1, alpha=0.25, color="#9ca3af")
+
+    ax.scatter([x[-1]], [current_yes], color="#22c55e", s=38, zorder=5)
+    ax.scatter([x[-1]], [current_no], color="#ef4444", s=38, zorder=5)
 
     ax.set_ylim(0, 100)
     ax.set_ylabel("Probabilità (%)", color="#9ca3af", fontsize=9)
@@ -2873,8 +2978,8 @@ async def chart(ctx, market_id: int):
     legend.get_frame().set_facecolor("#111827")
     legend.get_frame().set_edgecolor("#1f2937")
 
-    ax_bg.text(0.05, 0.08, f"Grafico aggiornato alle {updated_at}", fontsize=9, color="#6b7280")
-    ax_bg.text(0.74, 0.08, "Prediction Market Bot", fontsize=9, color="#6b7280", ha="right")
+    ax_bg.text(0.05, 0.08, f"Apertura YES: {opening_yes:.1f}% • Grafico aggiornato alle {updated_at}", fontsize=9, color="#6b7280")
+    ax_bg.text(0.74, 0.08, "Prediction Market Bot • v1.9.2", fontsize=9, color="#6b7280", ha="right")
 
     buffer = io.BytesIO()
     plt.savefig(buffer, format="png", facecolor="#0b0f19", bbox_inches="tight", pad_inches=0.15)
@@ -2924,6 +3029,13 @@ async def closemarket(ctx, market_id: int):
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
     embed.set_footer(text="Nessun payout distribuito. Usa !cancelmarket per rimborsare oppure !resolve per risolvere.")
     await ctx.send(embed=embed)
+    await log_admin_activity(
+        ctx,
+        "🔒 !closemarket",
+        market_id=market_id,
+        details=f"Mercato chiuso senza payout • {question}",
+        color=COLOR_WHITE
+    )
 
 
 @bot.command(aliases=["annullamercato"])
@@ -2985,6 +3097,13 @@ async def cancelmarket(ctx, market_id: int):
     embed.add_field(name="💸 Rimborsi totali", value=f"{total_refund} crediti", inline=True)
     embed.set_footer(text="Le posizioni aperte sono state chiuse e rimborsate.")
     await ctx.send(embed=embed)
+    await log_admin_activity(
+        ctx,
+        "❌ !cancelmarket",
+        market_id=market_id,
+        details=f"Mercato annullato e rimborsato • Rimborsi totali: {total_refund} crediti • {question}",
+        color=COLOR_WHITE
+    )
 
 
 @bot.command(name="resolve", aliases=["risolvi"])
@@ -3036,6 +3155,13 @@ async def resolve_market_command(ctx, market_id: int, result: str):
     embed.add_field(name="✅ Esito", value=result, inline=True)
     embed.add_field(name="💰 Premi distribuiti", value=f"{total_paid} crediti", inline=True)
     await ctx.send(embed=embed)
+    await log_admin_activity(
+        ctx,
+        "✅ !resolve",
+        market_id=market_id,
+        details=f"Risoluzione manuale: {result} • Payout: {total_paid} crediti • {question}",
+        color=COLOR_WHITE
+    )
 
 
 @bot.command(aliases=["aggiungisaldo"])
@@ -3052,6 +3178,12 @@ async def addbalance(ctx, member: discord.Member, amount: int):
     record_wealth_snapshot(user_id)
 
     await ctx.send(f"✅ Aggiunti **{amount}** crediti a {member.mention}.")
+    await log_admin_activity(
+        ctx,
+        "💰 !addbalance",
+        details=f"Aggiunti {amount} crediti a {member.mention} (`{member.id}`)",
+        color=COLOR_WHITE
+    )
 
 
 @bot.command(aliases=["rimuovisaldo"])
@@ -3068,6 +3200,12 @@ async def removebalance(ctx, member: discord.Member, amount: int):
     record_wealth_snapshot(user_id)
 
     await ctx.send(f"✅ Rimossi fino a **{amount}** crediti da {member.mention}.")
+    await log_admin_activity(
+        ctx,
+        "💸 !removebalance",
+        details=f"Rimossi fino a {amount} crediti da {member.mention} (`{member.id}`)",
+        color=COLOR_WHITE
+    )
 
 
 @bot.command(aliases=["resetutente"])
@@ -3084,6 +3222,12 @@ async def resetuser(ctx, member: discord.Member):
     record_wealth_snapshot(user_id)
 
     await ctx.send(f"🔄 Utente {member.mention} resettato a **1000 crediti**.")
+    await log_admin_activity(
+        ctx,
+        "♻️ !resetuser",
+        details=f"Utente resettato a 1000 crediti: {member.mention} (`{member.id}`)",
+        color=COLOR_WHITE
+    )
 
 
 # =========================
@@ -3099,7 +3243,7 @@ async def help_command(ctx, section: str = None):
         embed = discord.Embed(
             title="🛠️ Help Admin",
             description="Comandi riservati alla gestione del bot e dei mercati.",
-            color=0xf59e0b
+            color=COLOR_WHITE
         )
         embed.add_field(
             name="📊 Mercati",
@@ -3145,7 +3289,7 @@ async def help_command(ctx, section: str = None):
     embed = discord.Embed(
         title="📘 Help",
         description="Comandi disponibili per usare il prediction market.",
-        color=0x2563eb
+        color=COLOR_RED
     )
     embed.add_field(
         name="💰 Account",
@@ -3363,26 +3507,26 @@ async def resolver_loop():
 
                 print(f"[CLOSED] {mid} -> {final}")
 
-                if channel_id:
-                    try:
-                        channel = bot.get_channel(int(channel_id))
-                    except Exception:
-                        channel = None
+                result_channel = bot.get_channel(RESULTS_CHANNEL_ID)
+                if result_channel:
+                    outcome_icon = "🟢 YES" if final == "YES" else "🔴 NO"
+                    winner_text = res["home"] if winner == "HOME" else res["away"] if winner == "AWAY" else "Pareggio"
 
-                    if channel:
-                        embed = discord.Embed(
-                            title="🏁 Mercato chiuso",
-                            description=question,
-                            color=0x22c55e if final == "YES" else 0xef4444
-                        )
-                        embed.add_field(name="🆔 Mercato", value=str(mid), inline=True)
-                        embed.add_field(name="✅ Esito mercato", value=final, inline=True)
-                        embed.add_field(name="💰 Premi distribuiti", value=f"{total_paid} crediti", inline=True)
-                        embed.add_field(name="🏟️ Partita", value=f'{res["home"]} vs {res["away"]}', inline=False)
-                        embed.add_field(name="⚽ Risultato finale", value=score, inline=True)
-                        embed.set_footer(text="🎉 Congratulazioni ai vincitori!")
+                    embed = discord.Embed(
+                        title="🏁 Mercato risolto",
+                        description=question,
+                        color=COLOR_RESOLVED
+                    )
+                    embed.add_field(name="🏟️ Partita", value=f'{res["home"]} vs {res["away"]}', inline=False)
+                    embed.add_field(name="⚽ Risultato finale", value=score, inline=True)
+                    embed.add_field(name="🏆 Vincitore", value=winner_text, inline=True)
+                    embed.add_field(name="🎯 Esito mercato", value=outcome_icon, inline=True)
+                    embed.add_field(name="💰 Payout", value=f"Mercato #{mid} risolto • {total_paid} crediti distribuiti", inline=False)
+                    embed.set_footer(text="Grazie per aver giocato!")
 
-                        await channel.send(embed=embed)
+                    await result_channel.send(embed=embed)
+                else:
+                    print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
 
         except Exception as e:
             print("ERR:", e)
@@ -3466,3 +3610,4 @@ async def on_ready():
 # RUN
 # =========================
 bot.run(token)
+
