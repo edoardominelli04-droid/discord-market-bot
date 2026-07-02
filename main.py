@@ -92,6 +92,7 @@ COLOR_WHITE = 0xf8fafc         # Comandi Admin
 COLOR_GOLD = 0xfacc15          # Daily, Referral
 COLOR_DARK_PINK = 0xbe185d     # Follow
 COLOR_RESOLVED = 0xe5e7eb      # Mercato risolto neutro
+COLOR_BLACK = 0x000000         # Eventi speciali createevent
 
 SPECIAL_EVENT_CATEGORIES = {
     "politica": "🗳️ Politica / Elezioni",
@@ -2113,7 +2114,7 @@ async def createevent(ctx, category: str, *, question):
     embed = discord.Embed(
         title="🎲 Evento Speciale creato",
         description=question,
-        color=COLOR_PURPLE
+        color=COLOR_BLACK
     )
     embed.add_field(name="🏷️ Categoria", value=category_label, inline=False)
     embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
@@ -2124,7 +2125,7 @@ async def createevent(ctx, category: str, *, question):
         "🎲 !createevent",
         market_id=market_id,
         details=f"Categoria {category_label} • {question}",
-        color=COLOR_PURPLE
+        color=COLOR_BLACK
     )
 
 
@@ -2999,14 +3000,14 @@ async def chart(ctx, market_id: int):
 async def closemarket(ctx, market_id: int):
     await delete_admin_command_message(ctx)
     """Chiude un mercato senza payout."""
-    c.execute("SELECT id, question, active, resolved FROM markets WHERE id=?", (market_id,))
+    c.execute("SELECT id, question, active, resolved, match_key FROM markets WHERE id=?", (market_id,))
     row = c.fetchone()
 
     if not row:
         await ctx.send("❌ Mercato non trovato")
         return
 
-    _, question, active, resolved = row
+    _, question, active, resolved, match_key = row
 
     if active == 0:
         await ctx.send("⚠️ Mercato già chiuso")
@@ -3155,6 +3156,48 @@ async def resolve_market_command(ctx, market_id: int, result: str):
     embed.add_field(name="✅ Esito", value=result, inline=True)
     embed.add_field(name="💰 Premi distribuiti", value=f"{total_paid} crediti", inline=True)
     await ctx.send(embed=embed)
+
+    result_channel = bot.get_channel(RESULTS_CHANNEL_ID)
+    if result_channel:
+        outcome_icon = "🟢 YES" if result == "YES" else "🔴 NO"
+        partita_text = "Evento speciale / mercato manuale"
+        score_text = "Risoluzione manuale"
+        winner_text = "N/D"
+
+        if match_key and str(match_key).startswith("MATCH_"):
+            try:
+                match_api_id = str(match_key).replace("MATCH_", "")
+                res = get_match_result(match_api_id)
+                if res:
+                    partita_text = f'{res["home"]} vs {res["away"]}'
+                    if res["home_goals"] is not None and res["away_goals"] is not None:
+                        score_text = f'{res["home_goals"]}-{res["away_goals"]}'
+                    winner_api = res.get("winner")
+                    if winner_api == "HOME":
+                        winner_text = res["home"]
+                    elif winner_api == "AWAY":
+                        winner_text = res["away"]
+                    elif winner_api == "DRAW":
+                        winner_text = "Pareggio"
+            except Exception as e:
+                print(f"[RESULTS CHANNEL MANUAL] Errore recupero match: {e}")
+
+        result_embed = discord.Embed(
+            title="🏁 Mercato risolto",
+            description=question,
+            color=COLOR_RESOLVED
+        )
+        result_embed.add_field(name="🏟️ Partita", value=partita_text, inline=False)
+        result_embed.add_field(name="⚽ Risultato finale", value=score_text, inline=True)
+        result_embed.add_field(name="🏆 Vincitore", value=winner_text, inline=True)
+        result_embed.add_field(name="🎯 Esito mercato", value=outcome_icon, inline=True)
+        result_embed.add_field(name="💰 Payout", value=f"Mercato #{market_id} risolto • {total_paid} crediti distribuiti", inline=False)
+        result_embed.set_footer(text="Grazie per aver giocato!")
+
+        await result_channel.send(embed=result_embed)
+    else:
+        print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
+
     await log_admin_activity(
         ctx,
         "✅ !resolve",
