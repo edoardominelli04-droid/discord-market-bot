@@ -101,11 +101,19 @@ def admin_only():
     return commands.check(predicate)
 
 async def delete_admin_command_message(ctx):
-    """Elimina il messaggio comando degli admin quando il bot ha i permessi necessari."""
+    """Elimina il messaggio comando degli admin quando il bot ha i permessi necessari.
+
+    Nota: per cancellare i messaggi degli admin, il bot deve avere il permesso
+    Discord "Gestire messaggi" nel canale in cui viene usato il comando.
+    """
     try:
         await ctx.message.delete()
-    except Exception:
-        pass
+    except discord.Forbidden:
+        print(f"[ADMIN DELETE] Permesso Gestire messaggi mancante nel canale {getattr(ctx.channel, 'id', 'N/D')}")
+    except discord.HTTPException as e:
+        print(f"[ADMIN DELETE] Impossibile eliminare il comando admin: {e}")
+    except Exception as e:
+        print(f"[ADMIN DELETE] Errore inatteso: {e}")
 
 def api_get(path, params=None):
     url = f"{BASE_URL}{path}"
@@ -1557,7 +1565,10 @@ Prova prima:
 
         await market_channel.send(embed=announcement)
         try:
-            await market_channel.send(f"<@&{MARKET_ROLE_ID}>")
+            await market_channel.send(
+                content=f"<@&{MARKET_ROLE_ID}>",
+                allowed_mentions=discord.AllowedMentions(roles=True)
+            )
         except Exception as e:
             print(f"[MARKET ROLE PING] Impossibile pingare il ruolo {MARKET_ROLE_ID}: {e}")
     else:
