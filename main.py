@@ -12,6 +12,10 @@ plt.rcParams["axes.titleweight"] = "bold"
 plt.rcParams["axes.labelsize"] = 11
 
 from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 from discord.ext import commands
 
 
@@ -56,6 +60,26 @@ MARKET_CHANNEL_ID = 1522101664063029340
 # Ruolo Discord da pingare quando viene pubblicato un nuovo mercato.
 MARKET_ROLE_ID = 1522125298345447546
 
+# Canali dedicati al calendario automatico giornaliero.
+PUBLIC_CALENDAR_CHANNEL_ID = 1522149843663982753
+ADMIN_CALENDAR_CHANNEL_ID = 1522150991112310874
+CALENDAR_POST_HOUR = 11
+CALENDAR_POST_MINUTE = 0
+LAST_CALENDAR_POST_DATE = None
+
+SPECIAL_EVENT_CATEGORIES = {
+    "politica": "🗳️ Politica / Elezioni",
+    "f1": "🏎️ Formula 1",
+    "musica": "🎵 Musica",
+    "cinema": "🎬 Cinema",
+    "sport": "🏆 Sport extra calcio",
+    "geopolitica": "🌍 Geopolitica",
+    "economia": "💼 Economia / Mercati",
+    "gaming": "🎮 Gaming / eSport",
+    "tv": "📺 TV / Reality",
+    "attualita": "📰 Attualità"
+}
+
 COMPETITIONS = {
     "PL": "Premier League",
     "SA": "Serie A",
@@ -65,6 +89,17 @@ COMPETITIONS = {
     "CL": "Champions League",
     "WC": "World Cup",
     "EC": "European Championship"
+}
+
+COMPETITION_EMOJIS = {
+    "PL": "🇬🇧",
+    "SA": "🇮🇹",
+    "PD": "🇪🇸",
+    "BL1": "🇩🇪",
+    "FL1": "🇫🇷",
+    "CL": "🏆",
+    "WC": "🌍",
+    "EC": "🇪🇺"
 }
 
 
@@ -292,6 +327,27 @@ CREATE TABLE IF NOT EXISTS referrals (
 )
 """)
 
+c.execute("""
+CREATE TABLE IF NOT EXISTS follows (
+    follower_user_id TEXT,
+    followed_user_id TEXT,
+    created_at TEXT,
+    PRIMARY KEY (follower_user_id, followed_user_id)
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS user_badges (
+    user_id TEXT,
+    badge_id TEXT,
+    active INTEGER DEFAULT 1,
+    permanent INTEGER DEFAULT 1,
+    awarded_at TEXT,
+    removed_at TEXT,
+    PRIMARY KEY (user_id, badge_id)
+)
+""")
+
 # =========================
 # DATABASE UPDATE
 # =========================
@@ -299,7 +355,8 @@ for statement in [
     "ALTER TABLE trades ADD COLUMN price REAL",
     "ALTER TABLE trades ADD COLUMN closed INTEGER DEFAULT 0",
     "ALTER TABLE markets ADD COLUMN channel_id TEXT",
-    "ALTER TABLE markets ADD COLUMN alert_yes_price REAL"
+    "ALTER TABLE markets ADD COLUMN alert_yes_price REAL",
+    "ALTER TABLE markets ADD COLUMN event_category TEXT"
 ]:
     try:
         c.execute(statement)
@@ -440,18 +497,32 @@ def get_user_stats(user_id):
 
 
 def trader_level_from_xp(xp):
+    """Restituisce livello trader, XP nel livello corrente e XP richiesti per il prossimo livello."""
     xp = int(xp or 0)
-    level = 1
-    remaining = xp
-    required = 500
 
-    while remaining >= required:
-        remaining -= required
-        level += 1
-        required = 500 + (level - 1) * 250
+    levels = [
+        ("🪵 Wood", 0),
+        ("🩶 Silver", 2500),
+        ("⚜️ Gold", 7500),
+        ("🔹 Platinum", 17500),
+        ("💎 Diamond", 40000),
+        ("👑 Master", 80000),
+        ("🐉 Legend", 150000),
+    ]
 
-    return level, remaining, required
+    current_name, current_threshold = levels[0]
+    next_threshold = None
 
+    for idx, (name, threshold) in enumerate(levels):
+        if xp >= threshold:
+            current_name = name
+            current_threshold = threshold
+            next_threshold = levels[idx + 1][1] if idx + 1 < len(levels) else None
+
+    if next_threshold is None:
+        return current_name, xp - current_threshold, "MAX"
+
+    return current_name, xp - current_threshold, next_threshold - current_threshold
 
 def award_xp(user_id, amount):
     if amount <= 0:
@@ -523,6 +594,343 @@ def record_wealth_snapshot(user_id):
         VALUES (?, ?, ?)
     """, (user_id, now, net_worth))
     conn.commit()
+
+
+def get_following_count(user_id):
+    c.execute("SELECT COUNT(*) FROM follows WHERE follower_user_id=?", (str(user_id),))
+    return c.fetchone()[0] or 0
+
+
+def get_user_metrics(user_id):
+    user_id = str(user_id)
+    balance = get_user(user_id)
+    total_invested, open_value, _, open_positions = calculate_user_open_value(user_id)
+    net_worth = balance + open_value
+
+    c.execute("SELECT COUNT(*) FROM trades WHERE user_id=?", (user_id,))
+    total_trades = c.fetchone()[0] or 0
+
+    c.execute("SELECT COUNT(DISTINCT market_id) FROM trades WHERE user_id=?", (user_id,))
+    markets_played = c.fetchone()[0] or 0
+
+    c.execute("SELECT COUNT(*) FROM trades WHERE user_id=? AND side='YES'", (user_id,))
+    yes_trades = c.fetchone()[0] or 0
+
+    c.execute("SELECT COUNT(*) FROM trades WHERE user_id=? AND side='NO'", (user_id,))
+    no_trades = c.fetchone()[0] or 0
+
+    c.execute("""
+        SELECT COUNT(DISTINCT m.id)
+        FROM trades t
+        JOIN markets m ON t.market_id=m.id
+        WHERE t.user_id=?
+          AND m.resolved=1
+    """, (user_id,))
+    resolved_markets = c.fetchone()[0] or 0
+
+    c.execute("""
+        SELECT COUNT(DISTINCT m.id)
+        FROM trades t
+        JOIN markets m ON t.market_id=m.id
+        WHERE t.user_id=?
+          AND m.resolved=1
+          AND t.side=m.result
+    """, (user_id,))
+    won_markets = c.fetchone()[0] or 0
+
+    lost_markets = max(0, resolved_markets - won_markets)
+    accuracy = 0 if resolved_markets == 0 else (won_markets / resolved_markets) * 100
+
+    xp, current_streak, best_streak, _ = get_user_stats(user_id)
+    rank = calculate_server_rank(user_id)
+
+    return {
+        "balance": balance,
+        "net_worth": net_worth,
+        "open_positions": open_positions,
+        "total_trades": total_trades,
+        "markets_played": markets_played,
+        "yes_trades": yes_trades,
+        "no_trades": no_trades,
+        "resolved_markets": resolved_markets,
+        "won_markets": won_markets,
+        "lost_markets": lost_markets,
+        "accuracy": accuracy,
+        "xp": xp,
+        "current_streak": current_streak,
+        "best_streak": best_streak,
+        "rank": rank,
+        "following_count": get_following_count(user_id),
+    }
+
+
+BADGES = {
+    "prime_quote": {"emoji": "🎟️", "name": "Prime Quote", "desc": "Hai effettuato il tuo primo trade.", "permanent": True},
+    "mercato_aperto": {"emoji": "📊", "name": "Mercato Aperto", "desc": "Hai giocato almeno 5 mercati.", "permanent": True},
+    "trader_attivo": {"emoji": "💼", "name": "Trader Attivo", "desc": "Hai completato almeno 50 trade.", "permanent": True},
+    "trader_esperto": {"emoji": "📈", "name": "Trader Esperto", "desc": "Hai completato almeno 150 trade.", "permanent": True},
+    "veterano": {"emoji": "🏛️", "name": "Veterano", "desc": "Hai completato almeno 300 trade.", "permanent": True},
+    "cecchino": {"emoji": "🎯", "name": "Cecchino", "desc": "Accuracy almeno 70% con almeno 40 mercati risolti.", "permanent": True},
+    "inarrestabile": {"emoji": "🔥", "name": "Inarrestabile", "desc": "Hai raggiunto 15 vittorie consecutive.", "permanent": True},
+    "serie_leggendaria": {"emoji": "🐉", "name": "Serie Leggendaria", "desc": "Hai raggiunto 35 vittorie consecutive.", "permanent": True},
+    "bilanciato": {"emoji": "⚖️", "name": "Bilanciato", "desc": "Hai almeno 10 trade YES e 10 trade NO.", "permanent": True},
+    "social_trader": {"emoji": "🤝", "name": "Social Trader", "desc": "Segui almeno 75 trader.", "permanent": True},
+    "top_1": {"emoji": "🥇", "name": "Top 1", "desc": "Sei attualmente primo in classifica.", "permanent": False},
+    "podio": {"emoji": "🥈", "name": "Podio", "desc": "Sei attualmente nella Top 3.", "permanent": False},
+    "capitale_30k": {"emoji": "💰", "name": "Capitale 30K", "desc": "Il tuo saldo disponibile è almeno 30.000 crediti.", "permanent": False},
+    "capitale_50k": {"emoji": "🏦", "name": "Capitale 50K", "desc": "Il tuo saldo disponibile è almeno 50.000 crediti.", "permanent": False},
+    "capitale_80k": {"emoji": "💎", "name": "Capitale 80K", "desc": "Il tuo saldo disponibile è almeno 80.000 crediti.", "permanent": False},
+}
+
+
+def badge_conditions(metrics):
+    return {
+        "prime_quote": metrics["total_trades"] >= 1,
+        "mercato_aperto": metrics["markets_played"] >= 5,
+        "trader_attivo": metrics["total_trades"] >= 50,
+        "trader_esperto": metrics["total_trades"] >= 150,
+        "veterano": metrics["total_trades"] >= 300,
+        "cecchino": metrics["resolved_markets"] >= 40 and metrics["accuracy"] >= 70,
+        "inarrestabile": metrics["best_streak"] >= 15,
+        "serie_leggendaria": metrics["best_streak"] >= 35,
+        "bilanciato": metrics["yes_trades"] >= 10 and metrics["no_trades"] >= 10,
+        "social_trader": metrics["following_count"] >= 75,
+        "top_1": metrics["rank"] == 1,
+        "podio": metrics["rank"] is not None and metrics["rank"] <= 3,
+        "capitale_30k": metrics["balance"] >= 30000,
+        "capitale_50k": metrics["balance"] >= 50000,
+        "capitale_80k": metrics["balance"] >= 80000,
+    }
+
+
+def format_badge(badge_id):
+    b = BADGES.get(badge_id, {})
+    return f"{b.get('emoji', '🏅')} {b.get('name', badge_id)}"
+
+
+async def send_badge_dm(user_id, badge_id, obtained=True):
+    badge = BADGES.get(badge_id)
+    if not badge:
+        return
+
+    try:
+        user = bot.get_user(int(user_id)) or await bot.fetch_user(int(user_id))
+    except Exception:
+        user = None
+
+    if not user:
+        return
+
+    if obtained:
+        title = "🎉 Nuovo badge sbloccato!"
+        desc = (
+            f"Hai ottenuto il badge:\n\n"
+            f"**{format_badge(badge_id)}**\n\n"
+            f"_{badge['desc']}_"
+        )
+    else:
+        title = "⚠️ Badge dinamico rimosso"
+        desc = (
+            f"Hai perso temporaneamente il badge:\n\n"
+            f"**{format_badge(badge_id)}**\n\n"
+            "Potrai riottenerlo quando soddisferai di nuovo il requisito."
+        )
+
+    embed = discord.Embed(title=title, description=desc, color=0x22c55e if obtained else 0xef4444)
+    embed.set_footer(text="Apri !profile per vedere i tuoi badge.")
+
+    try:
+        await user.send(embed=embed)
+    except Exception:
+        pass
+
+
+async def evaluate_user_badges(user_id, notify=True):
+    user_id = str(user_id)
+    metrics = get_user_metrics(user_id)
+    conditions = badge_conditions(metrics)
+    now = datetime.now(timezone.utc).isoformat()
+
+    for badge_id, condition in conditions.items():
+        badge = BADGES[badge_id]
+        permanent = 1 if badge["permanent"] else 0
+
+        c.execute("SELECT active, permanent FROM user_badges WHERE user_id=? AND badge_id=?", (user_id, badge_id))
+        row = c.fetchone()
+        currently_active = bool(row and row[0] == 1)
+
+        if badge["permanent"]:
+            if condition and not currently_active:
+                c.execute("""
+                    INSERT OR REPLACE INTO user_badges (user_id, badge_id, active, permanent, awarded_at, removed_at)
+                    VALUES (?, ?, 1, ?, ?, NULL)
+                """, (user_id, badge_id, permanent, now))
+                conn.commit()
+                if notify:
+                    await send_badge_dm(user_id, badge_id, obtained=True)
+        else:
+            if condition and not currently_active:
+                c.execute("""
+                    INSERT OR REPLACE INTO user_badges (user_id, badge_id, active, permanent, awarded_at, removed_at)
+                    VALUES (?, ?, 1, ?, ?, NULL)
+                """, (user_id, badge_id, permanent, now))
+                conn.commit()
+                if notify:
+                    await send_badge_dm(user_id, badge_id, obtained=True)
+            elif not condition and currently_active:
+                c.execute("""
+                    UPDATE user_badges
+                    SET active=0, removed_at=?
+                    WHERE user_id=? AND badge_id=?
+                """, (now, user_id, badge_id))
+                conn.commit()
+                if notify:
+                    await send_badge_dm(user_id, badge_id, obtained=False)
+
+
+def get_active_badges(user_id):
+    c.execute("""
+        SELECT badge_id
+        FROM user_badges
+        WHERE user_id=?
+          AND active=1
+        ORDER BY awarded_at ASC
+    """, (str(user_id),))
+    return [r[0] for r in c.fetchall()]
+
+
+async def badge_checker_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            c.execute("SELECT user_id FROM users")
+            for (user_id,) in c.fetchall():
+                await evaluate_user_badges(user_id, notify=True)
+        except Exception as e:
+            print("BADGE CHECK ERR:", e)
+
+        await asyncio.sleep(900)
+
+
+def get_rome_now():
+    if ZoneInfo:
+        return datetime.now(ZoneInfo("Europe/Rome"))
+    return datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(hours=2)
+
+
+def format_match_time_rome(utc_date):
+    if not utc_date:
+        return "N/D"
+    try:
+        dt = datetime.fromisoformat(utc_date.replace("Z", "+00:00"))
+        if ZoneInfo:
+            dt = dt.astimezone(ZoneInfo("Europe/Rome"))
+        else:
+            dt = dt + timedelta(hours=2)
+        return dt.strftime("%H:%M")
+    except Exception:
+        return str(utc_date).replace("T", " ").replace("Z", "")
+
+
+def get_today_matches_for_competition(competition_code, target_date):
+    status_code, data = api_get(
+        f"/competitions/{competition_code}/matches",
+        {"dateFrom": target_date.isoformat(), "dateTo": target_date.isoformat()}
+    )
+    if status_code != 200:
+        return []
+    return data.get("matches", []) or []
+
+
+def build_calendar_embeds(public=True):
+    today = get_rome_now().date()
+    title = "📅 Partite di oggi" if public else "👑 Calendario admin"
+    description = "Calendario pubblico senza ID partita." if public else "Calendario operativo con Match ID per creare mercati."
+    embed = discord.Embed(title=title, description=description, color=0x2563eb if public else 0xf59e0b)
+
+    found = False
+    field_count = 0
+
+    for code, name in COMPETITIONS.items():
+        matches = get_today_matches_for_competition(code, today)
+        if not matches:
+            continue
+
+        found = True
+        emoji = COMPETITION_EMOJIS.get(code, "⚽")
+        lines = []
+
+        for m in matches[:6]:
+            mid = m.get("id")
+            home = m.get("homeTeam", {}).get("name", "Home")
+            away = m.get("awayTeam", {}).get("name", "Away")
+            status = m.get("status", "N/D")
+            time_str = format_match_time_rome(m.get("utcDate"))
+
+            if public:
+                lines.append(f"**{home}** vs **{away}\n🕒 {time_str} | 📡 {status}")
+            else:
+                lines.append(
+                    f"**{home}** vs **{away}**\n"
+                    f"🕒 {time_str} | 📡 {status}\n"
+                    f"🆔 Match ID: `{mid}`\n"
+                    f"Comando: `!creatematch {mid} Domanda del mercato`"
+                )
+
+        value = "\n\n".join(lines)
+        if len(value) > 1024:
+            value = value[:1000] + "..."
+
+        embed.add_field(name=f"{emoji} {name}", value=value, inline=False)
+        field_count += 1
+        if field_count >= 20:
+            break
+
+    if not found:
+        embed.add_field(name="📭 Nessuna partita", value="Nessuna partita disponibile oggi nelle competizioni monitorate.", inline=False)
+
+    embed.set_footer(text="Aggiornamento automatico giornaliero • Orario Roma")
+    return embed
+
+
+async def post_daily_calendars():
+    public_channel = bot.get_channel(PUBLIC_CALENDAR_CHANNEL_ID)
+    admin_channel = bot.get_channel(ADMIN_CALENDAR_CHANNEL_ID)
+
+    if public_channel:
+        try:
+            await public_channel.send(embed=build_calendar_embeds(public=True))
+        except Exception as e:
+            print(f"[CALENDAR PUBLIC] Errore invio: {e}")
+
+    if admin_channel:
+        try:
+            await admin_channel.send(embed=build_calendar_embeds(public=False))
+        except Exception as e:
+            print(f"[CALENDAR ADMIN] Errore invio: {e}")
+
+
+async def calendar_poster_loop():
+    global LAST_CALENDAR_POST_DATE
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            now = get_rome_now()
+            today_key = now.date().isoformat()
+
+            if (
+                now.hour == CALENDAR_POST_HOUR
+                and now.minute >= CALENDAR_POST_MINUTE
+                and LAST_CALENDAR_POST_DATE != today_key
+            ):
+                await post_daily_calendars()
+                LAST_CALENDAR_POST_DATE = today_key
+
+        except Exception as e:
+            print("CALENDAR LOOP ERR:", e)
+
+        await asyncio.sleep(60)
 
 
 
@@ -1077,7 +1485,7 @@ async def daily(ctx):
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="💰 Saldo aggiornato", value=str(balance), inline=True)
-    embed.add_field(name="💹 Livello trader", value=f"Lv {trader_level}", inline=True)
+    embed.add_field(name="💹 Livello trader", value=trader_level, inline=True)
     embed.add_field(name="📈 XP", value=f"{xp_current}/{xp_required}", inline=True)
     embed.set_footer(text="Comando disponibile anche come !giornaliero")
 
@@ -1150,6 +1558,7 @@ f"""🧪 TEST API FOOTBALL-DATA
 
 
 @bot.command(aliases=["competizioni"])
+@admin_only()
 async def competitions(ctx):
     msg = "🏆 COMPETIZIONI RAPIDE\n\n"
 
@@ -1354,6 +1763,7 @@ async def predict(ctx, match_id: int):
 # FIND MATCHES
 # =========================
 @bot.command(aliases=["oggi"])
+@admin_only()
 async def today(ctx, competition: str = "WC"):
     competition = competition.upper()
 
@@ -1576,6 +1986,71 @@ Prova prima:
 
 
 # =========================
+# CREATE SPECIAL EVENT MARKET
+# =========================
+@bot.command(aliases=["creaevento"])
+@admin_only()
+async def createevent(ctx, category: str, *, question):
+    category_key = category.lower().strip()
+
+    if category_key not in SPECIAL_EVENT_CATEGORIES:
+        categories = "\n".join([f"`{k}` → {v}" for k, v in SPECIAL_EVENT_CATEGORIES.items()])
+        await ctx.send(f"❌ Categoria non valida. Categorie disponibili:\n{categories}")
+        return
+
+    category_label = SPECIAL_EVENT_CATEGORIES[category_key]
+
+    c.execute("""
+        INSERT INTO markets (
+            question,
+            yes_pool,
+            no_pool,
+            total_pool,
+            active,
+            match_key,
+            resolved,
+            result,
+            channel_id,
+            alert_yes_price,
+            event_category
+        )
+        VALUES (?, 0, 0, 0, 1, ?, 0, NULL, ?, 50, ?)
+    """, (question, f"EVENT_{category_key.upper()}", str(ctx.channel.id), category_key))
+
+    market_id = c.lastrowid
+    conn.commit()
+
+    embed = discord.Embed(
+        title="🎲 Evento Speciale creato",
+        description=question,
+        color=0x8b5cf6
+    )
+    embed.add_field(name="🏷️ Categoria", value=category_label, inline=False)
+    embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
+    embed.set_footer(text="Il mercato dovrà essere risolto manualmente con !resolve ID YES/NO")
+    await ctx.send(embed=embed)
+
+    market_channel = bot.get_channel(MARKET_CHANNEL_ID)
+    if market_channel:
+        announcement = discord.Embed(
+            title="📣 Nuovo mercato disponibile!",
+            color=0x8b5cf6
+        )
+        announcement.add_field(name="🎲 Evento Speciale", value=category_label, inline=False)
+        announcement.add_field(name="❓ Domanda", value=question, inline=False)
+        announcement.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=False)
+        announcement.set_footer(text="💡 Acquista le tue quote")
+        await market_channel.send(embed=announcement)
+        try:
+            await market_channel.send(
+                content=f"<@&{MARKET_ROLE_ID}>",
+                allowed_mentions=discord.AllowedMentions(roles=True)
+            )
+        except Exception as e:
+            print(f"[EVENT ROLE PING] Impossibile pingare il ruolo {MARKET_ROLE_ID}: {e}")
+
+
+# =========================
 # MARKETS VIEW
 # =========================
 @bot.command(aliases=["mercati"])
@@ -1756,12 +2231,113 @@ async def portfolio(ctx):
     await ctx.send(embed=embed)
 
 # =========================
+# FOLLOW SYSTEM
+# =========================
+@bot.command()
+async def follow(ctx, member: discord.Member):
+    follower_id = str(ctx.author.id)
+    followed_id = str(member.id)
+
+    if member.bot:
+        await ctx.send("❌ Non puoi seguire un bot.")
+        return
+
+    if follower_id == followed_id:
+        await ctx.send("❌ Non puoi seguire te stesso.")
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    c.execute("""
+        INSERT OR IGNORE INTO follows (follower_user_id, followed_user_id, created_at)
+        VALUES (?, ?, ?)
+    """, (follower_id, followed_id, now))
+    conn.commit()
+
+    await evaluate_user_badges(follower_id, notify=True)
+
+    await ctx.send(f"✅ Ora segui {member.mention}.")
+
+
+@bot.command()
+async def unfollow(ctx, member: discord.Member):
+    follower_id = str(ctx.author.id)
+    followed_id = str(member.id)
+
+    c.execute("DELETE FROM follows WHERE follower_user_id=? AND followed_user_id=?", (follower_id, followed_id))
+    conn.commit()
+
+    await ctx.send(f"✅ Hai smesso di seguire {member.mention}.")
+
+
+@bot.command()
+async def following(ctx):
+    user_id = str(ctx.author.id)
+    c.execute("""
+        SELECT followed_user_id
+        FROM follows
+        WHERE follower_user_id=?
+        ORDER BY created_at DESC
+        LIMIT 25
+    """, (user_id,))
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Non segui ancora nessun trader.")
+        return
+
+    lines = []
+    for (followed_id,) in rows:
+        xp, *_ = get_user_stats(followed_id)
+        level, _, _ = trader_level_from_xp(xp)
+        lines.append(f"👤 <@{followed_id}> — {level}")
+
+    embed = discord.Embed(
+        title="👥 Trader seguiti",
+        description="\n".join(lines),
+        color=0x2563eb
+    )
+    embed.set_footer(text="Usa !trader @utente per vedere una scheda sintetica.")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def trader(ctx, member: discord.Member):
+    user_id = str(member.id)
+    get_user(user_id)
+    await evaluate_user_badges(user_id, notify=False)
+
+    metrics = get_user_metrics(user_id)
+    level, xp_current, xp_required = trader_level_from_xp(metrics["xp"])
+    rank_text = f"#{metrics['rank']}" if metrics["rank"] else "N/D"
+
+    badge_ids = get_active_badges(user_id)
+    badge_text = " • ".join(format_badge(b) for b in badge_ids[:8]) if badge_ids else "Nessun badge."
+
+    embed = discord.Embed(
+        title=f"👤 Trader: {member.display_name} • {level}",
+        color=0x22c55e
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="🏆 Rank", value=rank_text, inline=True)
+    embed.add_field(name="💰 Saldo", value=str(metrics["balance"]), inline=True)
+    embed.add_field(name="💼 Patrimonio stimato", value=f"{metrics['net_worth']:.0f}", inline=True)
+    embed.add_field(name="🎯 Accuracy", value=f"{metrics['accuracy']:.1f}%", inline=True)
+    embed.add_field(name="🔥 Streak", value=str(metrics["current_streak"]), inline=True)
+    embed.add_field(name="📜 Trade", value=str(metrics["total_trades"]), inline=True)
+    embed.add_field(name="🏆 Vinti/Persi", value=f"{metrics['won_markets']} / {metrics['lost_markets']}", inline=True)
+    embed.add_field(name="📈 XP", value=f"{xp_current}/{xp_required}", inline=True)
+    embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
+    await ctx.send(embed=embed)
+
+
+# =========================
 # PROFILE
 # =========================
 @bot.command(aliases=["profilo"])
 async def profile(ctx):
     user_id = str(ctx.author.id)
     balance = get_user(user_id)
+    await evaluate_user_badges(user_id, notify=True)
 
     total_invested, total_value, _, open_positions = calculate_user_open_value(user_id)
     net_worth = balance + total_value
@@ -1803,14 +2379,14 @@ async def profile(ctx):
     profit_emoji = "🟢" if open_profit >= 0 else "🔴"
 
     embed = discord.Embed(
-        title=f"👤 Profilo di {ctx.author.display_name}",
+        title=f"👤 Profilo di {ctx.author.display_name} • {trader_level}",
         description="Scheda personale del trader",
         color=color
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
 
     embed.add_field(name="⭐ Livello server", value=server_level, inline=True)
-    embed.add_field(name="💹 Livello trader", value=f"Lv {trader_level}", inline=True)
+    embed.add_field(name="💹 Livello trader", value=trader_level, inline=True)
     embed.add_field(name="🏆 Rank", value=rank_text, inline=True)
 
     embed.add_field(name="💰 Saldo", value=f"{balance}", inline=True)
@@ -1828,6 +2404,12 @@ async def profile(ctx):
     embed.add_field(name="🏆 Mercati vinti", value=str(won_markets), inline=True)
     embed.add_field(name="❌ Mercati persi", value=str(lost_markets), inline=True)
     embed.add_field(name="📊 Mercati risolti", value=str(resolved_markets), inline=True)
+
+    badge_ids = get_active_badges(user_id)
+    badge_text = " • ".join(format_badge(b) for b in badge_ids[:12]) if badge_ids else "Nessun badge sbloccato."
+    if len(badge_text) > 1024:
+        badge_text = badge_text[:1000] + "..."
+    embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
 
     embed.set_footer(text="Comando disponibile anche come !profilo")
 
@@ -2032,6 +2614,7 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
 
     await ctx.send(embed=embed)
+    await evaluate_user_badges(user_id, notify=True)
 
 # =========================
 # SELL POSITION
@@ -2175,6 +2758,7 @@ async def sell(ctx, market_id: int, percent: str, side: str = None):
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(new_yes_p)}`", inline=False)
 
     await ctx.send(embed=embed)
+    await evaluate_user_badges(user_id, notify=True)
 
 # =========================
 # CHART
@@ -2433,6 +3017,10 @@ async def resolve_market_command(ctx, market_id: int, result: str):
     update_streaks_for_market(market_id, result)
     total_paid = payout_market(market_id, result)
 
+    c.execute("SELECT DISTINCT user_id FROM trades WHERE market_id=?", (market_id,))
+    for (affected_user_id,) in c.fetchall():
+        await evaluate_user_badges(affected_user_id, notify=True)
+
     embed = discord.Embed(
         title="🏁 Mercato risolto manualmente",
         description=question,
@@ -2514,6 +3102,7 @@ async def help_command(ctx, section: str = None):
                 "`!closemarket ID` / `!chiudimercato`\n"
                 "`!cancelmarket ID` / `!annullamercato`\n"
                 "`!resolve ID YES/NO` / `!risolvi`\n"
+                "`!createevent categoria domanda` / `!creaevento`"
             ),
             inline=False
         )
@@ -2569,10 +3158,18 @@ async def help_command(ctx, section: str = None):
     embed.add_field(
         name="⚽ Info",
         value=(
-            "`!competitions` / `!competizioni`\n"
-            "`!today COMPETIZIONE` / `!oggi`\n"
             "`!live` / `!diretta`\n"
             "`!referrals` / `!inviti`"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="👥 Social trading",
+        value=(
+            "`!follow @utente`\n"
+            "`!unfollow @utente`\n"
+            "`!following`\n"
+            "`!trader @utente`"
         ),
         inline=False
     )
@@ -2742,6 +3339,10 @@ async def resolver_loop():
                 update_streaks_for_market(mid, final)
                 total_paid = payout_market(mid, final)
 
+                c.execute("SELECT DISTINCT user_id FROM trades WHERE market_id=?", (mid,))
+                for (affected_user_id,) in c.fetchall():
+                    await evaluate_user_badges(affected_user_id, notify=True)
+
                 score = "N/D"
                 if res["home_goals"] is not None and res["away_goals"] is not None:
                     score = f'{res["home_goals"]}-{res["away_goals"]}'
@@ -2843,6 +3444,8 @@ async def on_ready():
     await cache_all_invites()
     bot.loop.create_task(resolver_loop())
     bot.loop.create_task(referral_checker())
+    bot.loop.create_task(badge_checker_loop())
+    bot.loop.create_task(calendar_poster_loop())
 
 
 # =========================
