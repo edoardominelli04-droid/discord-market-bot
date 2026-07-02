@@ -311,7 +311,7 @@ def safe_entry_price(entry_price, fallback_price):
 # =========================
 # DATABASE
 # =========================
-conn = sqlite3.connect("/data/bot.db", check_same_thread=False)
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
@@ -794,7 +794,7 @@ async def send_badge_dm(user_id, badge_id, obtained=True):
             "Potrai riottenerlo quando soddisferai di nuovo il requisito."
         )
 
-    embed = discord.Embed(title=title, description=desc, color=0x22c55e if obtained else 0xef4444)
+    embed = discord.Embed(title=title, description=desc, color=COLOR_GREEN if obtained else COLOR_RED)
     embed.set_footer(text="Apri !profile per vedere i tuoi badge.")
 
     try:
@@ -1715,7 +1715,7 @@ async def predict(ctx, match_id: int):
         embed = discord.Embed(
             title="❌ Match non trovato",
             description=f"Non riesco a recuperare il match `{match_id}` da football-data.org.",
-            color=0xef4444
+            color=COLOR_RED
         )
         embed.add_field(name="Status API", value=str(status_code), inline=True)
         embed.add_field(name="Suggerimento", value="Prova prima `!testmatch ID` oppure recupera l'ID con `!fixtures`.", inline=False)
@@ -1766,7 +1766,7 @@ async def predict(ctx, match_id: int):
     embed = discord.Embed(
         title="🤖 AI Match Analysis",
         description=f"**{home_name}** vs **{away_name}**",
-        color=prediction["color"]
+        color=COLOR_ORANGE
     )
 
     embed.add_field(name="🏆 Competizione", value=competition_name, inline=True)
@@ -2020,7 +2020,7 @@ Prova prima:
     embed = discord.Embed(
         title="📊 Mercato creato",
         description=question,
-        color=0x22c55e
+        color=COLOR_GREEN
     )
     embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
     embed.add_field(name="🆔 Match API", value=str(match_id), inline=True)
@@ -2043,7 +2043,7 @@ Prova prima:
     if market_channel:
         announcement = discord.Embed(
             title="📣 Nuovo mercato disponibile!",
-            color=0x22c55e
+            color=COLOR_GREEN
         )
         announcement.add_field(
             name="🏟️ Partita",
@@ -2212,7 +2212,7 @@ async def market(ctx, market_id: int):
     embed = discord.Embed(
         title=f"📊 Mercato #{market_id}",
         description=q,
-        color=market_color(yes_p)
+        color=COLOR_PURPLE
     )
     embed.add_field(name="🏟️ Partita", value=match_line, inline=False)
     embed.add_field(name="📡 Stato API", value=api_status, inline=True)
@@ -2239,7 +2239,7 @@ async def portfolio(ctx):
         embed = discord.Embed(
             title=f"💼 Portafoglio di {ctx.author.display_name}",
             description="Non hai ancora aperto nessuna posizione.",
-            color=0x64748b
+            color=COLOR_BLUE
         )
         embed.set_thumbnail(url=ctx.author.display_avatar.url)
         embed.add_field(name="💰 Saldo", value=f"{balance} crediti", inline=False)
@@ -2285,7 +2285,7 @@ async def portfolio(ctx):
 
     total_profit = total_value - total_invested
     total_profit_pct = 0 if total_invested == 0 else (total_profit / total_invested) * 100
-    color = 0x22c55e if total_profit >= 0 else 0xef4444
+    color = COLOR_BLUE
 
     embed = discord.Embed(
         title=f"💼 Portafoglio di {ctx.author.display_name}",
@@ -2372,7 +2372,7 @@ async def following(ctx):
     embed = discord.Embed(
         title="👥 Trader seguiti",
         description="\n".join(lines),
-        color=0x2563eb
+        color=COLOR_BLUE
     )
     embed.set_footer(text="Usa !trader @utente per vedere una scheda sintetica.")
     await ctx.send(embed=embed)
@@ -2393,7 +2393,7 @@ async def trader(ctx, member: discord.Member):
 
     embed = discord.Embed(
         title=f"👤 Trader: {member.display_name} • {level}",
-        color=0x22c55e
+        color=COLOR_GREEN
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🏆 Rank", value=rank_text, inline=True)
@@ -2453,7 +2453,7 @@ async def profile(ctx):
     rank = calculate_server_rank(user_id)
     rank_text = f"#{rank}" if rank else "N/D"
 
-    color = 0x22c55e if open_profit >= 0 else 0xef4444
+    color = COLOR_BLUE
     profit_emoji = "🟢" if open_profit >= 0 else "🔴"
 
     embed = discord.Embed(
@@ -2518,7 +2518,7 @@ async def leaderboard(ctx):
     embed = discord.Embed(
         title="🏆 Classifica trader",
         description="Classifica per patrimonio stimato: saldo + valore posizioni aperte",
-        color=0xfacc15
+        color=COLOR_GOLD
     )
 
     medals = ["🥇", "🥈", "🥉"]
@@ -2558,7 +2558,7 @@ async def live(ctx):
 
     embed = discord.Embed(
         title="🔴 Mercati live",
-        color=0xef4444
+        color=COLOR_RED
     )
     found_live = False
 
@@ -2681,7 +2681,7 @@ async def buy(ctx, market_id: int, side: str, amount: int):
 
     embed = discord.Embed(
         title="📈 Acquisto effettuato",
-        color=0x22c55e if side == "YES" else 0xef4444
+        color=COLOR_PINK
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
@@ -2822,7 +2822,7 @@ async def sell(ctx, market_id: int, percent: str, side: str = None):
 
     embed = discord.Embed(
         title="💸 Posizione venduta",
-        color=0x22c55e if profit >= 0 else 0xef4444
+        color=COLOR_PINK
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
@@ -3024,7 +3024,7 @@ async def closemarket(ctx, market_id: int):
     embed = discord.Embed(
         title="🔒 Mercato chiuso manualmente",
         description=question,
-        color=0xf59e0b
+        color=COLOR_ORANGE
     )
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
     embed.set_footer(text="Nessun payout distribuito. Usa !cancelmarket per rimborsare oppure !resolve per risolvere.")
@@ -3091,7 +3091,7 @@ async def cancelmarket(ctx, market_id: int):
     embed = discord.Embed(
         title="🚫 Mercato annullato",
         description=question,
-        color=0xef4444
+        color=COLOR_RED
     )
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
     embed.add_field(name="💸 Rimborsi totali", value=f"{total_refund} crediti", inline=True)
@@ -3149,7 +3149,7 @@ async def resolve_market_command(ctx, market_id: int, result: str):
     embed = discord.Embed(
         title="🏁 Mercato risolto manualmente",
         description=question,
-        color=0x22c55e if result == "YES" else 0xef4444
+        color=COLOR_RESOLVED
     )
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
     embed.add_field(name="✅ Esito", value=result, inline=True)
@@ -3429,7 +3429,7 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
     embed = discord.Embed(
         title="🚨 Alert quota",
         description=question,
-        color=0x22c55e if diff > 0 else 0xef4444
+        color=COLOR_ORANGE
     )
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
     embed.add_field(name="Variazione YES", value=f"{direction} {last_alert_yes_price:.1f}% → {yes_p:.1f}%", inline=False)
@@ -3610,4 +3610,3 @@ async def on_ready():
 # RUN
 # =========================
 bot.run(token)
-
