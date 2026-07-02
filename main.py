@@ -311,7 +311,7 @@ def safe_entry_price(entry_price, fallback_price):
 # =========================
 # DATABASE
 # =========================
-conn = sqlite3.connect("bot.db", check_same_thread=False)
+conn = sqlite3.connect("/data/bot.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
