@@ -2900,10 +2900,24 @@ def _espn_person_name(obj):
 
 
 def _espn_detail_people(detail):
-    """Estrae nomi calciatori da varie strutture ESPN possibili."""
+    """Estrae nomi calciatori da varie strutture ESPN possibili.
+
+    ESPN, per il calcio, spesso usa `athletesInvolved` negli eventi live
+    (gol, cartellini, sostituzioni). Se non lo leggiamo, il bot vede solo
+    etichette generiche tipo `Goal` o `Yellow Card`.
+    """
     people = []
 
-    for key in ["athletes", "participants", "players", "competitors"]:
+    for key in [
+        "athletesInvolved",
+        "athleteInvolved",
+        "participantsInvolved",
+        "playersInvolved",
+        "athletes",
+        "participants",
+        "players",
+        "competitors",
+    ]:
         value = detail.get(key)
         if isinstance(value, list):
             for item in value:
@@ -2988,15 +3002,29 @@ def espn_event_details_summary(event):
 
         raw_text = _espn_detail_text(detail)
         text = raw_text.lower()
+        type_data = detail.get("type") or {}
+        type_id = str(type_data.get("id") or "") if isinstance(type_data, dict) else ""
         side = _espn_detail_team_side(detail, home_id, away_id)
         minute = _espn_event_minute(detail)
         people = _espn_detail_people(detail)
 
-        is_yellow = "yellow" in text or "ammon" in text
-        is_red = "red" in text or "espuls" in text
-        is_sub = "substitution" in text or "sostit" in text or "sub " in text
-        is_penalty = "penalty" in text or "rigor" in text
-        is_goal = any(k in text for k in ["goal", "gol", "own goal", "penalty - scored"]) and not is_yellow and not is_red
+        # Usiamo sia il testo sia i flag/ID ESPN: alcuni eventi live hanno
+        # campi strutturati ma poco testo descrittivo.
+        is_yellow = bool(detail.get("yellowCard")) or "yellow" in text or "ammon" in text or type_id in {"74"}
+        is_red = bool(detail.get("redCard")) or "red" in text or "espuls" in text or type_id in {"75"}
+        is_sub = (
+            bool(detail.get("substitution"))
+            or "substitution" in text
+            or "sostit" in text
+            or "sub " in text
+            or type_id in {"76"}
+        )
+        is_penalty = bool(detail.get("penaltyKick")) or "penalty" in text or "rigor" in text
+        is_goal = (
+            bool(detail.get("scoringPlay"))
+            or detail.get("scoreValue") not in (None, 0, "0")
+            or any(k in text for k in ["goal", "gol", "own goal", "penalty - scored"])
+        ) and not is_yellow and not is_red
 
         if side and is_yellow:
             cards_y[side] += 1
@@ -3236,54 +3264,6 @@ async def testespn(ctx):
 
     embed.set_footer(text="ESPN è un endpoint pubblico non ufficiale: usare sempre con fallback.")
     await ctx.send(embed=embed)
-
-
-@bot.command()
-@admin_only()
-async def debugespn(ctx):
-    matches, diagnostics = fetch_espn_live_matches()
-
-    if not matches:
-        await ctx.send("❌ Nessuna partita live ESPN trovata.")
-        return
-
-    league_code = matches[0]["league_code"]
-    event_id = str(matches[0]["event_id"])
-
-    status, data = fetch_espn_scoreboard(league_code)
-    events = data.get("events") or []
-
-    target = None
-    for event in events:
-        if str(event.get("id")) == event_id:
-            target = event
-            break
-
-    if not target:
-        await ctx.send("❌ Evento ESPN non trovato nel JSON.")
-        return
-
-    comps = target.get("competitions") or []
-    comp = comps[0] if comps else {}
-    details = comp.get("details") or target.get("details") or []
-
-    goal_details = []
-    for detail in details:
-        text = str(detail).lower()
-        if "goal" in text or "gol" in text:
-            goal_details.append(detail)
-
-    if not goal_details:
-        await ctx.send("⚠️ Nessun evento Goal trovato nei dettagli ESPN.")
-        return
-
-    import json
-    raw = json.dumps(goal_details[0], ensure_ascii=False, indent=2)
-
-    if len(raw) > 1800:
-        raw = raw[:1800] + "\n..."
-
-    await ctx.send(f"```json\n{raw}\n```")
 
 
 async def live_football_data_fallback(ctx):
