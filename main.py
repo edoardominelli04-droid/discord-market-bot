@@ -83,7 +83,7 @@ RESULTS_CHANNEL_ID = 1522189230128762971
 
 # Canale dedicato alle notizie automatiche / Gazzetta v2.0.1.
 GAZZETTA_CHANNEL_ID = 1522564253725364295
-MARKET_PULSE_CHANNEL_ID = GAZZETTA_CHANNEL_ID  # alias retrocompatibile
+MARKET_PULSE_CHANNEL_ID = SPORT_ANNOUNCEMENTS_CHANNEL_ID  # market update / pulse pubblici su annunci sport
 
 # API News + Live v2.0.1
 # GNEWS_API_KEY: notizie calcistiche via GNews.
@@ -2172,7 +2172,7 @@ Prova prima:
             alert_yes_price
         )
         VALUES (?, 0, 0, 0, 1, ?, 0, NULL, ?, 50)
-    """, (question, f"MATCH_{match_id}", str(ctx.channel.id)))
+    """, (question, f"MATCH_{match_id}", str(SPORT_ANNOUNCEMENTS_CHANNEL_ID)))
 
     market_id = c.lastrowid
     conn.commit()
@@ -4709,8 +4709,10 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
     if abs(diff) < ALERT_THRESHOLD:
         return
 
-    # v2.0.1: gli alert pubblici sulle quote vanno su #gazzetta.
-    channel = await get_discord_channel_safe(GAZZETTA_CHANNEL_ID)
+    # v2.0.2: gli alert pubblici sulle quote vanno nel canale annunci sport.
+    channel = await get_discord_channel_safe(SPORT_ANNOUNCEMENTS_CHANNEL_ID)
+    if not channel and MARKET_CHANNEL_ID:
+        channel = await get_discord_channel_safe(MARKET_CHANNEL_ID)
     if not channel and channel_id:
         try:
             channel = await get_discord_channel_safe(int(channel_id))
@@ -4718,6 +4720,7 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
             channel = None
 
     if not channel:
+        print(f"[MARKET UPDATE] Canale annunci sport {SPORT_ANNOUNCEMENTS_CHANNEL_ID} non trovato.")
         return
 
     direction = "📈" if diff > 0 else "📉"
@@ -4733,7 +4736,7 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
     embed.add_field(name="🔴 NO", value=f"{no_p:.1f}%", inline=True)
     embed.add_field(name="📊 Scostamento", value=f"{diff:+.1f}%", inline=True)
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
-    embed.set_footer(text="Gazzetta Market Update • v2.0.1")
+    embed.set_footer(text="Annunci Sport • Market Update v2.0.2")
 
     await channel.send(embed=embed)
 
