@@ -5,6 +5,8 @@ import requests
 import asyncio
 import matplotlib.pyplot as plt
 import io
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 
 plt.style.use("dark_background")
 plt.rcParams["font.family"] = "DejaVu Sans"
@@ -85,26 +87,15 @@ RESULTS_CHANNEL_ID = 1522189230128762971
 GAZZETTA_CHANNEL_ID = 1522564253725364295
 MARKET_PULSE_CHANNEL_ID = SPORT_ANNOUNCEMENTS_CHANNEL_ID  # market update / pulse pubblici su annunci sport
 
-# API News + Live v2.0.1
-# GNEWS_API_KEY: notizie calcistiche via GNews.
-# SPORTMONKS_API_TOKEN: live calcio via Sportmonks.
-# API_FOOTBALL_KEY: opzionale, per fonti API-Football/API-Sports se disponibili.
+# API News / Gazzetta v2.0.2
+# GNEWS_API_KEY: fonte secondaria per notizie calcistiche via GNews.
+# La vecchia integrazione Sportmonks/Sofascore è stata rimossa: #gazzetta usa RSS + GNews,
+# mentre !live usa ESPN scoreboard pubblico con fallback football-data.org.
 GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY")
-SPORTMONKS_API_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN") or os.environ.get("SPORTMONKS_TOKEN")
-SPORTMONKS_BASE_URL = os.environ.get("SPORTMONKS_BASE_URL", "https://api.sportmonks.com/v3/football")
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
 API_FOOTBALL_HOST = os.environ.get("API_FOOTBALL_HOST", "v3.football.api-sports.io")
 API_FOOTBALL_NEWS_URL = os.environ.get("API_FOOTBALL_NEWS_URL")
 NEWS_LOOP_MINUTES = 30
-GAZZETTA_LIVE_LOOP_SECONDS = 90
-
-# Sofascore fallback gratuito/non ufficiale per live calcio Gazzetta.
-# Non richiede token, ma gli endpoint possono cambiare nel tempo perché non sono API ufficiali pubbliche.
-SOFASCORE_BASE_URL = os.environ.get("SOFASCORE_BASE_URL", "https://api.sofascore.com/api/v1")
-SOFASCORE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; CalcyscordBot/2.0; +https://discord.com)",
-    "Accept": "application/json,text/plain,*/*",
-}
 
 # Canale dedicato al registro delle attività admin.
 ACTIVITY_LOG_CHANNEL_ID = 1522190483713953813
@@ -2774,54 +2765,165 @@ async def leaderboard(ctx):
     await ctx.send(embed=embed)
 
 # =========================
-# LIVE MARKETS
+# LIVE / ESPN SCOREBOARD
 # =========================
+ESPN_SOCCER_LEAGUES = {
+    "ita.1": "Serie A",
+    "eng.1": "Premier League",
+    "esp.1": "La Liga",
+    "ger.1": "Bundesliga",
+    "fra.1": "Ligue 1",
+    "uefa.champions": "Champions League",
+    "uefa.europa": "Europa League",
+    "uefa.europa.conf": "Conference League",
+}
+
+ESPN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; CalcyscordBot/2.0; +https://discord.com)",
+    "Accept": "application/json,text/plain,*/*",
+}
+
+
+def espn_scoreboard_url(league_code):
+    return f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard"
+
+
+def fetch_espn_scoreboard(league_code):
+    return request_json(espn_scoreboard_url(league_code), headers=ESPN_HEADERS, timeout=12)
+
+
+def espn_competitors(event):
+    comps = event.get("competitions") or []
+    comp = comps[0] if comps else {}
+    competitors = comp.get("competitors") or []
+    home = {"name": "Casa", "score": "-"}
+    away = {"name": "Trasferta", "score": "-"}
+
+    for team_data in competitors:
+        team = team_data.get("team") or {}
+        item = {
+            "name": team.get("displayName") or team.get("shortDisplayName") or team.get("name") or "Squadra",
+            "score": team_data.get("score", "-"),
+        }
+        if team_data.get("homeAway") == "home":
+            home = item
+        elif team_data.get("homeAway") == "away":
+            away = item
+
+    return home, away
+
+
+def espn_event_is_live(event):
+    status = event.get("status") or {}
+    type_data = status.get("type") or {}
+    state = str(type_data.get("state") or "").lower()
+    name = str(type_data.get("name") or type_data.get("description") or "").lower()
+    return state == "in" or "in progress" in name or "halftime" in name
+
+
+def espn_event_status_text(event):
+    status = event.get("status") or {}
+    type_data = status.get("type") or {}
+    display_clock = status.get("displayClock") or ""
+    short_detail = event.get("shortDetail") or type_data.get("shortDetail") or type_data.get("description") or type_data.get("name") or "LIVE"
+    if display_clock:
+        return f"{display_clock} • {short_detail}"
+    return str(short_detail)
+
+
+def fetch_espn_live_matches():
+    matches = []
+    diagnostics = []
+
+    for league_code, league_name in ESPN_SOCCER_LEAGUES.items():
+        status, data = fetch_espn_scoreboard(league_code)
+        events = data.get("events") or [] if isinstance(data, dict) else []
+        live_events = []
+
+        if status == 200:
+            for event in events:
+                if espn_event_is_live(event):
+                    home, away = espn_competitors(event)
+                    live_events.append({
+                        "league_code": league_code,
+                        "league": league_name,
+                        "event_id": event.get("id"),
+                        "home": home["name"],
+                        "away": away["name"],
+                        "home_score": home["score"],
+                        "away_score": away["score"],
+                        "status": espn_event_status_text(event),
+                    })
+        else:
+            print(f"[ESPN LIVE] {league_code} status {status}: {data}")
+
+        diagnostics.append({
+            "league": league_name,
+            "code": league_code,
+            "status": status,
+            "events": len(events),
+            "live": len(live_events),
+        })
+        matches.extend(live_events)
+
+    return matches, diagnostics
+
+
 @bot.command(aliases=["diretta"])
 async def live(ctx):
-    """Live calcio: usa Sofascore gratuito/non ufficiale, con fallback sui mercati football-data.org."""
-    await live_sofascore(ctx)
+    """Mostra le partite live tramite ESPN scoreboard, con fallback sui mercati football-data.org."""
+    matches, diagnostics = fetch_espn_live_matches()
 
+    if matches:
+        embed = discord.Embed(
+            title="🔴 Live calcio",
+            description="Partite in corso da ESPN scoreboard pubblico.",
+            color=COLOR_RED,
+            timestamp=datetime.now(timezone.utc)
+        )
 
-async def live_sofascore(ctx):
-    status, data = sofascore_live_payload()
+        for m in matches[:10]:
+            embed.add_field(
+                name=f"⚽ {m['home']} vs {m['away']}",
+                value=(
+                    f"🏆 {m['league']}\n"
+                    f"📊 Risultato: **{m['home_score']}-{m['away_score']}**\n"
+                    f"⏱️ Stato: **{m['status']}**"
+                )[:1024],
+                inline=False
+            )
 
-    if status != 200:
-        await ctx.send("⚠️ Sofascore non disponibile ora. Uso il fallback football-data.org.")
-        await live_football_data_fallback(ctx)
+        embed.set_footer(text="Comando disponibile anche come !diretta • ESPN fallback gratuito")
+        await ctx.send(embed=embed)
         return
 
-    fixtures = sofascore_extract_events(data)
-    if not fixtures:
-        await ctx.send("📭 Nessuna partita live in questo momento")
-        return
+    # Se ESPN non trova live, mostriamo eventuali mercati live football-data.org.
+    await live_football_data_fallback(ctx)
 
+
+@bot.command()
+@admin_only()
+async def testespn(ctx):
+    """Diagnostica admin per controllare se ESPN restituisce partite live."""
+    matches, diagnostics = fetch_espn_live_matches()
     embed = discord.Embed(
-        title="🔴 Live calcio",
-        description="Dati live da Sofascore • fonte gratuita non ufficiale",
-        color=COLOR_RED,
+        title="🧪 Test ESPN Live",
+        description=f"Partite live trovate: **{len(matches)}**",
+        color=COLOR_CYAN,
         timestamp=datetime.now(timezone.utc)
     )
 
-    for fixture in fixtures[:8]:
-        home, away = sofascore_fixture_teams(fixture)
-        score = sofascore_fixture_score(fixture)
-        minute = sofascore_fixture_minute(fixture)
-        state = sofascore_fixture_state(fixture)
-        league = sofascore_fixture_league(fixture)
-        incidents = sofascore_fetch_incidents(fixture.get("id"))
-        events = sofascore_fixture_events_summary(incidents, fixture)
+    lines = []
+    for d in diagnostics:
+        lines.append(f"`{d['code']}` {d['league']}: HTTP {d['status']} • eventi {d['events']} • live {d['live']}")
 
-        embed.add_field(
-            name=f"⚽ {home} vs {away}",
-            value=(
-                f"🏆 {league}\n"
-                f"📊 Risultato: **{score}** | ⏱️ {minute} | 📡 {state}\n"
-                f"{events}"
-            )[:1024],
-            inline=False
-        )
+    embed.add_field(name="Endpoint controllati", value="\n".join(lines)[:1024] or "N/D", inline=False)
 
-    embed.set_footer(text="Comando disponibile anche come !diretta • Sofascore fallback")
+    if matches:
+        live_lines = [f"{m['league']}: {m['home']} {m['home_score']}-{m['away_score']} {m['away']} ({m['status']})" for m in matches[:8]]
+        embed.add_field(name="Live", value="\n".join(live_lines)[:1024], inline=False)
+
+    embed.set_footer(text="ESPN è un endpoint pubblico non ufficiale: usare sempre con fallback.")
     await ctx.send(embed=embed)
 
 
@@ -2835,12 +2937,12 @@ async def live_football_data_fallback(ctx):
     rows = c.fetchall()
 
     if not rows:
-        await ctx.send("📭 Nessun mercato attivo")
+        await ctx.send("📭 Nessuna partita live trovata e nessun mercato attivo")
         return
 
     embed = discord.Embed(
         title="🔴 Mercati live",
-        description="Fallback football-data.org",
+        description="Fallback football-data.org sui mercati attivi",
         color=COLOR_RED
     )
     found_live = False
@@ -2882,315 +2984,12 @@ async def live_football_data_fallback(ctx):
         )
 
     if not found_live:
-        await ctx.send("📭 Nessun mercato live in questo momento")
+        await ctx.send("📭 Nessuna partita live in questo momento")
         return
 
     embed.set_footer(text="Comando disponibile anche come !diretta")
     await ctx.send(embed=embed)
 
-
-
-# =========================
-# SOFASCORE LIVE HELPERS
-# =========================
-def sofascore_get(path, params=None):
-    """Wrapper Sofascore non ufficiale. Non richiede token."""
-    clean_path = str(path).strip("/")
-    url = f"{SOFASCORE_BASE_URL.rstrip('/')}/{clean_path}"
-    return request_json(url, headers=SOFASCORE_HEADERS, params=params or {}, timeout=12)
-
-
-def sofascore_live_payload():
-    """Recupera le partite live calcio da Sofascore."""
-    return sofascore_get("sport/football/events/live")
-
-
-def sofascore_extract_events(data):
-    if not isinstance(data, dict):
-        return []
-    events = data.get("events") or data.get("data") or []
-    return events if isinstance(events, list) else []
-
-
-def sofascore_fixture_teams(event):
-    home = event.get("homeTeam") or {}
-    away = event.get("awayTeam") or {}
-    home_name = home.get("name") or home.get("shortName") or "Casa"
-    away_name = away.get("name") or away.get("shortName") or "Trasferta"
-    return home_name, away_name
-
-
-def sofascore_fixture_score(event):
-    home_score = event.get("homeScore") or {}
-    away_score = event.get("awayScore") or {}
-    hs = home_score.get("current")
-    as_ = away_score.get("current")
-    if hs is None:
-        hs = home_score.get("display") or home_score.get("period1")
-    if as_ is None:
-        as_ = away_score.get("display") or away_score.get("period1")
-    if hs is None or as_ is None:
-        return "N/D"
-    return f"{hs}-{as_}"
-
-
-def sofascore_fixture_state(event):
-    status = event.get("status") or {}
-    if isinstance(status, dict):
-        return status.get("description") or status.get("type") or "LIVE"
-    return str(status or "LIVE")
-
-
-def sofascore_fixture_league(event):
-    tournament = event.get("tournament") or {}
-    unique = tournament.get("uniqueTournament") if isinstance(tournament, dict) else {}
-    if isinstance(unique, dict) and unique.get("name"):
-        return unique.get("name")
-    if isinstance(tournament, dict):
-        return tournament.get("name") or "Competizione"
-    return "Competizione"
-
-
-def sofascore_fixture_minute(event):
-    status = event.get("status") or {}
-    desc = status.get("description") if isinstance(status, dict) else ""
-    time_data = event.get("time") or {}
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-
-    current_start = time_data.get("currentPeriodStartTimestamp") if isinstance(time_data, dict) else None
-    if current_start:
-        try:
-            elapsed = max(0, int((now_ts - int(current_start)) // 60))
-            if desc and ("2nd" in desc.lower() or "second" in desc.lower() or "secondo" in desc.lower()):
-                elapsed += 45
-            if elapsed > 130:
-                return desc or "LIVE"
-            return f"{elapsed}'"
-        except Exception:
-            pass
-
-    for key in ["current", "minute", "matchTime"]:
-        value = time_data.get(key) if isinstance(time_data, dict) else None
-        if value is not None:
-            return f"{value}'"
-    return desc or "LIVE"
-
-
-def sofascore_fetch_incidents(event_id):
-    event_id = safe_int(event_id)
-    if event_id is None:
-        return []
-    status, data = sofascore_get(f"event/{event_id}/incidents")
-    if status != 200 or not isinstance(data, dict):
-        return []
-    incidents = data.get("incidents") or []
-    return incidents if isinstance(incidents, list) else []
-
-
-def sofascore_incident_label(incident):
-    incident_type = str(incident.get("incidentType") or incident.get("type") or "").lower()
-    incident_class = str(incident.get("incidentClass") or "").lower()
-    text = f"{incident_type} {incident_class}"
-
-    if "goal" in text:
-        if "own" in text:
-            return "⚽ Autogol"
-        if "penalty" in text:
-            return "⚽ Rigore segnato"
-        return "⚽ Goal"
-    if "card" in text:
-        if "red" in text:
-            return "🟥 Espulsione"
-        return "🟨 Ammonizione"
-    if "substitution" in text:
-        return "🔄 Sostituzione"
-    if "var" in text:
-        return "📺 VAR"
-    if "period" in text:
-        return "⏱️ Periodo"
-    return "🟢 INFO"
-
-
-def sofascore_incident_minute(incident):
-    minute = incident.get("time") or incident.get("minute")
-    added = incident.get("addedTime") or incident.get("injuryTime")
-    if minute and added:
-        return f"{minute}+{added}"
-    return str(minute or "")
-
-
-def sofascore_incident_player(incident):
-    player = incident.get("player") or {}
-    if isinstance(player, dict):
-        return player.get("name") or player.get("shortName") or ""
-    return ""
-
-
-def sofascore_incident_team(incident, fixture=None):
-    is_home = incident.get("isHome")
-    if fixture and is_home is not None:
-        home, away = sofascore_fixture_teams(fixture)
-        return home if bool(is_home) else away
-    return ""
-
-
-def sofascore_fixture_events_summary(incidents, fixture=None):
-    useful = []
-    for inc in incidents or []:
-        label = sofascore_incident_label(inc)
-        if label in ["⚽ Goal", "⚽ Autogol", "⚽ Rigore segnato", "🟥 Espulsione", "🟨 Ammonizione", "🔄 Sostituzione", "📺 VAR"]:
-            useful.append(inc)
-
-    if not useful:
-        return "📭 Nessun evento dettagliato disponibile."
-
-    lines = []
-    for inc in useful[:5]:
-        label = sofascore_incident_label(inc)
-        minute = sofascore_incident_minute(inc)
-        player = sofascore_incident_player(inc)
-        team = sofascore_incident_team(inc, fixture)
-        prefix = f"{minute}' " if minute else ""
-        body = player or team or "Evento live"
-        lines.append(f"{label} {prefix}{body}")
-    return "\n".join(lines)
-
-def sportmonks_fixture_teams(fixture):
-    participants = sportmonks_list_from_relation(fixture.get("participants"))
-    home = "Casa"
-    away = "Trasferta"
-    for p in participants:
-        meta = p.get("meta") or {}
-        location = str(meta.get("location", "")).lower()
-        name = p.get("name") or p.get("short_code") or "Squadra"
-        if location == "home":
-            home = name
-        elif location == "away":
-            away = name
-    if home == "Casa" and len(participants) >= 1:
-        home = participants[0].get("name") or home
-    if away == "Trasferta" and len(participants) >= 2:
-        away = participants[1].get("name") or away
-    return home, away
-
-
-def sportmonks_fixture_score(fixture):
-    scores = sportmonks_list_from_relation(fixture.get("scores"))
-    home_score = away_score = None
-    for s in scores:
-        score_data = s.get("score") or {}
-        goals = score_data.get("goals")
-        participant = str(s.get("description") or s.get("participant") or "").lower()
-        if "current" not in str(s.get("type") or s.get("type_id") or s.get("description") or "current").lower() and len(scores) > 2:
-            # Se Sportmonks restituisce più score storici, preferiamo comunque quelli descritti home/away.
-            pass
-        if "home" in participant:
-            home_score = goals
-        elif "away" in participant:
-            away_score = goals
-    if home_score is None or away_score is None:
-        return "N/D"
-    return f"{home_score}-{away_score}"
-
-
-def sportmonks_fixture_minute(fixture):
-    minute = fixture.get("minute") or fixture.get("current_minute") or fixture.get("time")
-    extra = fixture.get("extra_minute") or fixture.get("added_time")
-    if minute and extra:
-        return f"{minute}+{extra}'"
-    if minute:
-        return f"{minute}'"
-    return "N/D"
-
-
-def sportmonks_fixture_state(fixture):
-    state = fixture.get("state") or {}
-    if isinstance(state, dict):
-        return state.get("name") or state.get("short_name") or fixture.get("status") or "LIVE"
-    return str(state or fixture.get("status") or "LIVE")
-
-
-def sportmonks_fixture_league(fixture):
-    league = fixture.get("league") or {}
-    if isinstance(league, dict):
-        if isinstance(league.get("data"), dict):
-            return league["data"].get("name") or "Competizione"
-        return league.get("name") or "Competizione"
-    return "Competizione"
-
-
-def sportmonks_event_label(event):
-    type_data = event.get("type") or {}
-    type_name = ""
-    if isinstance(type_data, dict):
-        if isinstance(type_data.get("data"), dict):
-            type_data = type_data["data"]
-        type_name = (type_data.get("name") or type_data.get("code") or type_data.get("developer_name") or "").lower()
-    type_name = type_name or str(event.get("type") or event.get("type_id") or event.get("event_type") or "").lower()
-    result_info = str(event.get("result_info") or event.get("addition") or "").lower()
-    text = f"{type_name} {result_info}"
-
-    if "goal" in text or "penalty scored" in text:
-        return "⚽ Goal"
-    if "red" in text:
-        return "🟥 Espulsione"
-    if "yellow" in text:
-        return "🟨 Ammonizione"
-    if "substitution" in text or "subst" in text:
-        return "🔄 Sostituzione"
-    if "lineup" in text or "formation" in text:
-        return "📋 Formazione"
-    if "var" in text:
-        return "📺 VAR"
-    return "🟢 INFO"
-
-
-def sportmonks_event_minute(event):
-    minute = event.get("minute") or event.get("time") or event.get("period_minute")
-    extra = event.get("extra_minute") or event.get("injury_time")
-    if minute and extra:
-        return f"{minute}+{extra}"
-    return str(minute or "")
-
-
-def sportmonks_event_player(event):
-    for key in ["player", "participant", "related_player"]:
-        value = event.get(key)
-        if isinstance(value, dict):
-            if isinstance(value.get("data"), dict):
-                return value["data"].get("name") or value["data"].get("display_name") or ""
-            return value.get("name") or value.get("display_name") or ""
-    return event.get("player_name") or event.get("player") or ""
-
-
-def sportmonks_event_team(event, fixture=None):
-    team = event.get("participant_name") or event.get("team_name") or ""
-    if team:
-        return team
-    participant_id = event.get("participant_id") or event.get("team_id")
-    if fixture and participant_id:
-        for p in sportmonks_list_from_relation(fixture.get("participants")):
-            if str(p.get("id")) == str(participant_id):
-                return p.get("name") or ""
-    return ""
-
-
-def sportmonks_fixture_events_summary(fixture):
-    events = sportmonks_fixture_events(fixture)
-    if not events:
-        return "📭 Nessun evento dettagliato disponibile."
-
-    lines = []
-    for ev in events[-5:]:
-        minute = sportmonks_event_minute(ev)
-        player = sportmonks_event_player(ev)
-        team = sportmonks_event_team(ev, fixture)
-        label = sportmonks_event_label(ev)
-        prefix = f"{minute}' " if minute else ""
-        body = player or team or "Evento live"
-        lines.append(f"{label} {prefix}{body}")
-
-    return "\n".join(lines)
 
 # =========================
 # BUY + PRICE UPDATE
@@ -5024,83 +4823,15 @@ async def get_discord_channel_safe(channel_id):
         return None
 
 
-def sportmonks_get(path, params=None):
-    """Wrapper Sportmonks v2.0.1: non blocca il bot se il token manca o l'API risponde male."""
-    if not SPORTMONKS_API_TOKEN:
-        return None, {"error": "SPORTMONKS_API_TOKEN mancante"}
-
-    clean_path = str(path).lstrip("/")
-    url = f"{SPORTMONKS_BASE_URL.rstrip('/')}/{clean_path}"
-    final_params = dict(params or {})
-    final_params.setdefault("api_token", SPORTMONKS_API_TOKEN)
-
-    return request_json(url, params=final_params, timeout=12)
-
-
-def safe_int(value):
-    try:
-        return int(value)
-    except Exception:
-        return None
-
-
-SPORTMONKS_LIVE_PATH = "livescores/inplay"
-SPORTMONKS_LIVE_INCLUDE = "participants;events.type;scores;state;league;periods;timeline.type"
-
-
-def sportmonks_get_debug(path, params=None):
-    """Richiama Sportmonks e restituisce anche URL/parametri diagnostici senza esporre il token."""
-    clean_path = str(path).lstrip("/")
-    url = f"{SPORTMONKS_BASE_URL.rstrip('/')}/{clean_path}"
-    final_params = dict(params or {})
-    safe_params = dict(final_params)
-    status, data = sportmonks_get(clean_path, params=final_params)
-    safe_params.pop("api_token", None)
-    return status, data, url, safe_params
-
-
-def sportmonks_live_payload():
-    """Recupera le partite live dall'endpoint ufficiale Sportmonks Football API v3.
-
-    La documentazione indica /v3/football/livescores/inplay.
-    Usiamo direttamente questo endpoint invece di fixtures/live, che su alcuni account
-    può generare 422 o richiedere parametri diversi.
-    """
-    return sportmonks_get(
-        SPORTMONKS_LIVE_PATH,
-        params={"include": SPORTMONKS_LIVE_INCLUDE}
-    )
-
-
-def sportmonks_list_from_relation(value):
-    """Normalizza relazioni Sportmonks che possono essere liste o dict con chiave data."""
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        data = value.get("data")
-        if isinstance(data, list):
-            return data
-    return []
-
-
-def sportmonks_fixture_events(fixture):
-    """Estrae eventi live da più campi possibili della risposta v3."""
-    events = []
-    for key in ["events", "timeline"]:
-        events.extend(sportmonks_list_from_relation(fixture.get(key)))
-    # rimuove duplicati mantenendo ordine
-    seen = set()
-    unique = []
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        ev_id = ev.get("id") or f"{ev.get('minute')}-{ev.get('type_id')}-{ev.get('player_name')}-{ev.get('participant_id')}"
-        if ev_id in seen:
-            continue
-        seen.add(ev_id)
-        unique.append(ev)
-    return unique
-
+# Fonti RSS gratuite per #gazzetta. Ogni feed è opzionale: se non risponde, viene saltato.
+GAZZETTA_RSS_FEEDS = [
+    ("BBC Football", "https://feeds.bbci.co.uk/sport/football/rss.xml"),
+    ("Sky Sports Football", "https://www.skysports.com/rss/12040"),
+    ("ESPN Soccer", "https://www.espn.com/espn/rss/soccer/news"),
+    ("Gazzetta Calcio", "https://www.gazzetta.it/rss/Calcio.xml"),
+    ("Corriere dello Sport Calcio", "https://www.corrieredellosport.it/rss/calcio"),
+    ("Tuttosport Calcio", "https://www.tuttosport.com/rss/calcio"),
+]
 
 # Filtro intelligente GNews/Gazzetta: calcio mondiale, non cronaca/politica.
 FOOTBALL_COMPETITION_KEYWORDS = [
@@ -5199,6 +4930,132 @@ def mark_news_seen(source, external_id):
         conn.commit()
     except Exception as e:
         print(f"[NEWS SEEN] Errore salvataggio: {e}")
+
+
+def _strip_xml_namespace(tag):
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def _child_text(node, child_name):
+    if node is None:
+        return ""
+    for child in list(node):
+        if _strip_xml_namespace(child.tag).lower() == child_name.lower():
+            return (child.text or "").strip()
+    return ""
+
+
+def _first_link(node):
+    # RSS: <link>url</link>; Atom: <link href="url" />
+    direct = _child_text(node, "link")
+    if direct:
+        return direct
+    for child in list(node):
+        if _strip_xml_namespace(child.tag).lower() == "link":
+            href = child.attrib.get("href")
+            if href:
+                return href.strip()
+    return ""
+
+
+def _parse_rss_date(raw):
+    if not raw:
+        return ""
+    try:
+        return parsedate_to_datetime(raw).isoformat()
+    except Exception:
+        return str(raw)[:80]
+
+
+def parse_rss_items(source_name, xml_text, limit=6):
+    """Parser RSS/Atom leggero senza dipendenze esterne."""
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception as e:
+        print(f"[RSS] XML non valido per {source_name}: {e}")
+        return []
+
+    items = []
+    for node in root.iter():
+        tag = _strip_xml_namespace(node.tag).lower()
+        if tag not in ("item", "entry"):
+            continue
+
+        title = _child_text(node, "title") or "Notizia calcistica"
+        description = _child_text(node, "description") or _child_text(node, "summary") or _child_text(node, "content") or ""
+        url = _first_link(node)
+        guid = _child_text(node, "guid") or _child_text(node, "id") or url or title
+        published = _child_text(node, "pubDate") or _child_text(node, "published") or _child_text(node, "updated")
+
+        article = {
+            "source": source_name,
+            "external_id": guid,
+            "title": title,
+            "description": description,
+            "url": url,
+            "published_at": _parse_rss_date(published),
+        }
+        if is_relevant_football_news(article):
+            items.append(article)
+        else:
+            print(f"[RSS FILTER] Scartata da {source_name}: {article['title']} | score={article.get('relevance_score')} | {article.get('relevance_reason')}")
+
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def fetch_rss_football_news():
+    articles = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; CalcyscordBot/2.0; +https://discord.com)",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+
+    for source_name, url in GAZZETTA_RSS_FEEDS:
+        try:
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code != 200:
+                print(f"[RSS] {source_name} status {r.status_code}: {url}")
+                continue
+            articles.extend(parse_rss_items(source_name, r.text, limit=4))
+        except Exception as e:
+            print(f"[RSS] Errore {source_name}: {e}")
+
+    articles.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+    return articles[:12]
+
+
+@bot.command()
+@admin_only()
+async def testrss(ctx):
+    """Diagnostica admin per controllare i feed RSS della Gazzetta."""
+    embed = discord.Embed(
+        title="🧪 Test RSS Gazzetta",
+        description="Controllo feed RSS calcistici.",
+        color=COLOR_CYAN,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; CalcyscordBot/2.0; +https://discord.com)",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    lines = []
+    total_relevant = 0
+    for source_name, url in GAZZETTA_RSS_FEEDS:
+        try:
+            r = requests.get(url, headers=headers, timeout=12)
+            parsed = parse_rss_items(source_name, r.text, limit=5) if r.status_code == 200 else []
+            total_relevant += len(parsed)
+            lines.append(f"{source_name}: HTTP {r.status_code} • rilevanti {len(parsed)}")
+        except Exception as e:
+            lines.append(f"{source_name}: errore {str(e)[:60]}")
+
+    embed.add_field(name="Feed", value="\n".join(lines)[:1024] or "N/D", inline=False)
+    embed.add_field(name="Totale notizie rilevanti", value=str(total_relevant), inline=True)
+    await ctx.send(embed=embed)
 
 
 def fetch_gnews_sports():
@@ -5304,7 +5161,7 @@ async def post_news_article(channel, article):
         embed.add_field(name="Link", value=article["url"][:1024], inline=False)
     if article.get("relevance_score") is not None:
         embed.add_field(name="Rilevanza calcio", value=f"{article.get('relevance_score')} punti", inline=True)
-    embed.set_footer(text="Gazzetta • filtro calcio mondiale v2.0.1")
+    embed.set_footer(text="Gazzetta • RSS + GNews • filtro calcio mondiale v2.0.2")
 
     await channel.send(embed=embed)
 
@@ -5318,7 +5175,7 @@ async def market_pulse_news_loop():
             if not channel:
                 print(f"[GAZZETTA] Canale {GAZZETTA_CHANNEL_ID} non trovato.")
             else:
-                articles = fetch_api_football_news() + fetch_gnews_sports()
+                articles = fetch_rss_football_news() + fetch_api_football_news() + fetch_gnews_sports()
 
                 for article in articles:
                     source = article.get("source", "news")
@@ -5336,224 +5193,7 @@ async def market_pulse_news_loop():
         await asyncio.sleep(NEWS_LOOP_MINUTES * 60)
 
 
-async def gazzetta_live_loop():
-    """Pubblica su #gazzetta eventi live Sofascore: goal, cartellini, VAR, sostituzioni.
-
-    Sofascore è usato come fallback gratuito/non ufficiale al posto di Sportmonks,
-    perché il piano Free di Sportmonks non include Livescores/Inplay.
-    """
-    await bot.wait_until_ready()
-
-    while not bot.is_closed():
-        try:
-            channel = await get_discord_channel_safe(GAZZETTA_CHANNEL_ID)
-            if not channel:
-                await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
-                continue
-
-            status, data = sofascore_live_payload()
-
-            if status != 200:
-                print(f"[GAZZETTA LIVE] Sofascore status {status}: {data}")
-                await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
-                continue
-
-            fixtures = sofascore_extract_events(data)
-            for fixture in fixtures:
-                fixture_id = safe_int(fixture.get("id"))
-                if fixture_id is None:
-                    continue
-
-                home, away = sofascore_fixture_teams(fixture)
-                score = sofascore_fixture_score(fixture)
-                league = sofascore_fixture_league(fixture)
-                minute = sofascore_fixture_minute(fixture)
-                state = sofascore_fixture_state(fixture)
-
-                live_id = f"sofa-live-start-{fixture_id}"
-                if not is_news_already_seen("SofascoreLive", live_id):
-                    embed = discord.Embed(
-                        title=f"🔴 Live | {home} vs {away}",
-                        description=f"🏆 {league}\n📊 Risultato: **{score}**\n⏱️ Minuto/Stato: **{minute} • {state}**",
-                        color=COLOR_RED,
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                    embed.set_footer(text="Gazzetta Live • Sofascore fallback non ufficiale")
-                    await channel.send(embed=embed)
-                    mark_news_seen("SofascoreLive", live_id)
-                    await asyncio.sleep(1)
-
-                incidents = sofascore_fetch_incidents(fixture_id)
-                for inc in incidents:
-                    label = sofascore_incident_label(inc)
-                    if label not in ["⚽ Goal", "⚽ Autogol", "⚽ Rigore segnato", "🟥 Espulsione", "🟨 Ammonizione", "🔄 Sostituzione", "📺 VAR"]:
-                        continue
-
-                    minute_inc = sofascore_incident_minute(inc)
-                    player = sofascore_incident_player(inc)
-                    team = sofascore_incident_team(inc, fixture)
-                    event_id = inc.get("id") or f"{fixture_id}-{minute_inc}-{label}-{player or team}"
-                    if is_news_already_seen("SofascoreLive", event_id):
-                        continue
-
-                    embed = discord.Embed(
-                        title=f"{label} | {home} vs {away}",
-                        description=f"🏆 {league}\n📊 Risultato: **{score}**",
-                        color=COLOR_GREEN if "Goal" in label or "Rigore" in label or "Autogol" in label else COLOR_RED if "Espulsione" in label else COLOR_CYAN,
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                    if minute_inc:
-                        embed.add_field(name="⏱️ Minuto", value=f"{minute_inc}'", inline=True)
-                    if player:
-                        embed.add_field(name="👤 Giocatore", value=str(player)[:250], inline=True)
-                    if team:
-                        embed.add_field(name="🏟️ Squadra", value=str(team)[:250], inline=True)
-                    embed.set_footer(text="Gazzetta Live • Sofascore fallback non ufficiale")
-
-                    await channel.send(embed=embed)
-                    mark_news_seen("SofascoreLive", event_id)
-                    await asyncio.sleep(1)
-
-        except Exception as e:
-            print("[GAZZETTA LIVE] Errore loop Sofascore:", e)
-
-        await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
-
-
-@bot.command(name="testsofascore")
-@admin_only()
-async def testsofascore(ctx):
-    """Diagnostica admin per Gazzetta Live / Sofascore."""
-    await delete_admin_command_message(ctx)
-
-    status, data = sofascore_live_payload()
-    fixtures = sofascore_extract_events(data)
-
-    embed = discord.Embed(
-        title="🧪 Test Gazzetta Live / Sofascore",
-        color=COLOR_CYAN if status == 200 else COLOR_RED,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.add_field(name="Status HTTP", value=str(status), inline=True)
-    embed.add_field(name="Partite live trovate", value=str(len(fixtures)), inline=True)
-    embed.add_field(name="Endpoint", value=f"`{SOFASCORE_BASE_URL.rstrip('/')}/sport/football/events/live`", inline=False)
-
-    if status != 200:
-        raw = str(data)[:900] if data else "Nessuna risposta JSON"
-        embed.add_field(name="Risposta API", value=f"```{raw}```", inline=False)
-        embed.set_footer(text="Sofascore è non ufficiale: se cambia endpoint, va aggiornato il parser.")
-        await ctx.send(embed=embed)
-        return
-
-    if not fixtures:
-        raw = str(data)[:900] if data else "events vuoto"
-        embed.add_field(
-            name="Nessuna partita live",
-            value="L'endpoint Sofascore risponde, ma non ci sono partite live restituite in questo momento.",
-            inline=False
-        )
-        embed.add_field(name="Estratto risposta", value=f"```{raw}```", inline=False)
-        await ctx.send(embed=embed)
-        return
-
-    lines = []
-    total_incidents = 0
-    for fixture in fixtures[:8]:
-        home, away = sofascore_fixture_teams(fixture)
-        score = sofascore_fixture_score(fixture)
-        minute = sofascore_fixture_minute(fixture)
-        state = sofascore_fixture_state(fixture)
-        league = sofascore_fixture_league(fixture)
-        incidents = sofascore_fetch_incidents(fixture.get("id"))
-        total_incidents += len(incidents)
-        lines.append(
-            f"**{home} vs {away}**\n"
-            f"{league} | {state} | {minute} | {score}\n"
-            f"Eventi/incidenti letti: **{len(incidents)}**"
-        )
-
-    embed.add_field(name="Eventi totali letti", value=str(total_incidents), inline=True)
-    embed.add_field(name="Partite", value="\n\n".join(lines)[:1024], inline=False)
-    embed.set_footer(text="Test diretto Sofascore usato dal bot per #gazzetta")
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="testgazzetta")
-@admin_only()
-async def testgazzetta(ctx):
-    """Diagnostica admin per Gazzetta Live / Sportmonks.
-
-    Mostra status HTTP, endpoint usato, numero di partite live e presenza eventi.
-    Non espone mai il token API.
-    """
-    await delete_admin_command_message(ctx)
-
-    if not SPORTMONKS_API_TOKEN:
-        await ctx.send("❌ SPORTMONKS_API_TOKEN mancante nelle variabili Railway.")
-        return
-
-    status, data, url, params = sportmonks_get_debug(
-        SPORTMONKS_LIVE_PATH,
-        params={"include": SPORTMONKS_LIVE_INCLUDE}
-    )
-
-    fixtures = []
-    if isinstance(data, dict):
-        fixtures = data.get("data") or []
-    if not isinstance(fixtures, list):
-        fixtures = []
-
-    embed = discord.Embed(
-        title="🧪 Test Gazzetta Live / Sportmonks",
-        color=COLOR_CYAN if status == 200 else COLOR_RED,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.add_field(name="Status HTTP", value=str(status), inline=True)
-    embed.add_field(name="Partite live trovate", value=str(len(fixtures)), inline=True)
-    embed.add_field(name="Endpoint", value=f"`{url.replace(SPORTMONKS_API_TOKEN, '[TOKEN]')}`", inline=False)
-    embed.add_field(name="Include", value=f"`{params.get('include', '')}`", inline=False)
-
-    if status != 200:
-        raw = str(data)[:900] if data else "Nessuna risposta JSON"
-        embed.add_field(name="Risposta API", value=f"```{raw}```", inline=False)
-        embed.set_footer(text="Se vedi 401/403/subscription required, il problema è token/piano Sportmonks.")
-        await ctx.send(embed=embed)
-        return
-
-    if not fixtures:
-        raw = str(data)[:900] if data else "data vuoto"
-        embed.add_field(
-            name="Nessuna partita live",
-            value=(
-                "L'endpoint ha risposto 200, ma `data` è vuoto. "
-                "Se ci sono partite live, controlla che il tuo piano Sportmonks includa Livescores/Inplay."
-            ),
-            inline=False
-        )
-        embed.add_field(name="Estratto risposta", value=f"```{raw}```", inline=False)
-        await ctx.send(embed=embed)
-        return
-
-    lines = []
-    total_events = 0
-    for fixture in fixtures[:8]:
-        home, away = sportmonks_fixture_teams(fixture)
-        score = sportmonks_fixture_score(fixture)
-        minute = sportmonks_fixture_minute(fixture)
-        state = sportmonks_fixture_state(fixture)
-        league = sportmonks_fixture_league(fixture)
-        events = sportmonks_fixture_events(fixture)
-        total_events += len(events)
-        lines.append(
-            f"**{home} vs {away}**\n"
-            f"{league} | {state} | {minute} | {score}\n"
-            f"Eventi letti: **{len(events)}**"
-        )
-
-    embed.add_field(name="Eventi totali letti", value=str(total_events), inline=True)
-    embed.add_field(name="Partite", value="\n\n".join(lines)[:1024], inline=False)
-    embed.set_footer(text="Test diretto dell'endpoint /livescores/inplay usato dal bot")
-    await ctx.send(embed=embed)
+# Gazzetta live Sportmonks/Sofascore rimossa: #gazzetta usa RSS + GNews.
 
 
 async def notify_personal_alert(user_id, embed, fallback_channel=None):
@@ -5994,7 +5634,6 @@ async def on_ready():
     bot.loop.create_task(badge_checker_loop())
     bot.loop.create_task(calendar_poster_loop())
     bot.loop.create_task(market_pulse_news_loop())
-    bot.loop.create_task(gazzetta_live_loop())
     bot.loop.create_task(personal_alert_checker_loop())
 
 
