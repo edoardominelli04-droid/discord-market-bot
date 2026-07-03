@@ -63,9 +63,13 @@ MAX_BUYS_PER_USER_MARKET = 3
 
 # Canale Discord dedicato agli annunci dei nuovi mercati.
 MARKET_CHANNEL_ID = 1522101664063029340
+# Alias esplicito: canale #annunci-sport in cui pubblicare l'apertura dei mercati sportivi.
+SPORT_ANNOUNCEMENTS_CHANNEL_ID = MARKET_CHANNEL_ID
 
 # Ruolo Discord da pingare quando viene pubblicato un nuovo mercato.
 MARKET_ROLE_ID = 1522125298345447546
+# Alias esplicito: ruolo giocatori da pingare negli annunci sportivi.
+PLAYERS_ROLE_ID = MARKET_ROLE_ID
 
 # Canali dedicati al calendario automatico giornaliero.
 PUBLIC_CALENDAR_CHANNEL_ID = 1522149843663982753
@@ -224,6 +228,61 @@ async def log_admin_activity(ctx, action, market_id=None, details=None, color=CO
         await channel.send(embed=embed)
     except Exception as e:
         print(f"[ACTIVITY LOG] Errore invio log: {e}")
+
+
+
+async def get_discord_channel(channel_id):
+    """Recupera un canale anche quando non è ancora presente nella cache del bot."""
+    channel = bot.get_channel(int(channel_id))
+    if channel:
+        return channel
+    try:
+        return await bot.fetch_channel(int(channel_id))
+    except Exception as e:
+        print(f"[CHANNEL FETCH] Impossibile recuperare il canale {channel_id}: {e}")
+        return None
+
+
+async def announce_sport_market_opening(market_id, question, home, away, match_id, status):
+    """Pubblica l'apertura del mercato nel canale annunci sport con ping ruolo giocatori."""
+    market_channel = await get_discord_channel(SPORT_ANNOUNCEMENTS_CHANNEL_ID)
+
+    if not market_channel:
+        print(f"[MARKET ANNOUNCEMENT] Canale annunci sport {SPORT_ANNOUNCEMENTS_CHANNEL_ID} non trovato.")
+        return False
+
+    announcement = discord.Embed(
+        title="📣 Nuovo mercato sportivo disponibile!",
+        color=COLOR_GREEN
+    )
+    announcement.add_field(name="🏟️ Partita", value=f"{home} vs {away}", inline=False)
+    announcement.add_field(name="❓ Domanda", value=question, inline=False)
+    announcement.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
+    announcement.add_field(name="🆔 Match API", value=str(match_id), inline=True)
+    announcement.add_field(name="📡 Stato", value=str(status), inline=True)
+    announcement.add_field(
+        name="💸 Come partecipare",
+        value=f"`!buy {market_id} YES importo` oppure `!buy {market_id} NO importo`",
+        inline=False
+    )
+    announcement.set_footer(text="Mercato aperto • Ping riservato ai giocatori")
+
+    try:
+        await market_channel.send(
+            content=f"<@&{PLAYERS_ROLE_ID}>",
+            embed=announcement,
+            allowed_mentions=discord.AllowedMentions(roles=True)
+        )
+        return True
+    except discord.Forbidden:
+        print(
+            f"[MARKET ANNOUNCEMENT] Permessi insufficienti nel canale {SPORT_ANNOUNCEMENTS_CHANNEL_ID}. "
+            "Controlla: Vedere canale, Inviare messaggi, Incorporare link, Menzionare @everyone/ruoli."
+        )
+        return False
+    except Exception as e:
+        print(f"[MARKET ANNOUNCEMENT] Errore invio annuncio/ping giocatori: {e}")
+        return False
 
 
 def api_get(path, params=None):
@@ -2139,41 +2198,21 @@ Prova prima:
         color=COLOR_PURPLE
     )
 
-    # Annuncio pubblico nel canale dedicato ai mercati.
-    market_channel = bot.get_channel(MARKET_CHANNEL_ID)
+    # Annuncio pubblico nel canale #annunci-sport con ping del ruolo giocatori.
+    announced = await announce_sport_market_opening(
+        market_id=market_id,
+        question=question,
+        home=home,
+        away=away,
+        match_id=match_id,
+        status=status
+    )
 
-    if market_channel:
-        announcement = discord.Embed(
-            title="📣 Nuovo mercato disponibile!",
-            color=COLOR_GREEN
+    if not announced:
+        await ctx.send(
+            "⚠️ Mercato creato, ma non sono riuscito a pubblicarlo nel canale annunci sport "
+            "o a pingare il ruolo giocatori. Controlla ID canale/ruolo e permessi del bot."
         )
-        announcement.add_field(
-            name="🏟️ Partita",
-            value=f"{home} vs {away}",
-            inline=False
-        )
-        announcement.add_field(
-            name="❓ Domanda",
-            value=question,
-            inline=False
-        )
-        announcement.add_field(
-            name="🆔 Mercato",
-            value=f"#{market_id}",
-            inline=False
-        )
-        announcement.set_footer(text="💡 Acquista le tue quote")
-
-        await market_channel.send(embed=announcement)
-        try:
-            await market_channel.send(
-                content=f"<@&{MARKET_ROLE_ID}>",
-                allowed_mentions=discord.AllowedMentions(roles=True)
-            )
-        except Exception as e:
-            print(f"[MARKET ROLE PING] Impossibile pingare il ruolo {MARKET_ROLE_ID}: {e}")
-    else:
-        print(f"[MARKET ANNOUNCEMENT] Canale {MARKET_CHANNEL_ID} non trovato.")
 
 
 # =========================
