@@ -3238,6 +3238,54 @@ async def testespn(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.command()
+@admin_only()
+async def debugespn(ctx):
+    matches, diagnostics = fetch_espn_live_matches()
+
+    if not matches:
+        await ctx.send("❌ Nessuna partita live ESPN trovata.")
+        return
+
+    league_code = matches[0]["league_code"]
+    event_id = str(matches[0]["event_id"])
+
+    status, data = fetch_espn_scoreboard(league_code)
+    events = data.get("events") or []
+
+    target = None
+    for event in events:
+        if str(event.get("id")) == event_id:
+            target = event
+            break
+
+    if not target:
+        await ctx.send("❌ Evento ESPN non trovato nel JSON.")
+        return
+
+    comps = target.get("competitions") or []
+    comp = comps[0] if comps else {}
+    details = comp.get("details") or target.get("details") or []
+
+    goal_details = []
+    for detail in details:
+        text = str(detail).lower()
+        if "goal" in text or "gol" in text:
+            goal_details.append(detail)
+
+    if not goal_details:
+        await ctx.send("⚠️ Nessun evento Goal trovato nei dettagli ESPN.")
+        return
+
+    import json
+    raw = json.dumps(goal_details[0], ensure_ascii=False, indent=2)
+
+    if len(raw) > 1800:
+        raw = raw[:1800] + "\n..."
+
+    await ctx.send(f"```json\n{raw}\n```")
+
+
 async def live_football_data_fallback(ctx):
     c.execute("""
         SELECT id, question, yes_pool, no_pool, total_pool, match_key
