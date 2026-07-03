@@ -553,6 +553,39 @@ CREATE TABLE IF NOT EXISTS news_seen (
 """)
 
 # =========================
+# MARKETPLACE DATABASE
+# =========================
+c.execute("""
+CREATE TABLE IF NOT EXISTS user_inventory (
+    user_id TEXT,
+    item_id TEXT,
+    quantity INTEGER DEFAULT 1,
+    purchased_at TEXT,
+    PRIMARY KEY (user_id, item_id)
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS user_equipment (
+    user_id TEXT,
+    slot TEXT,
+    item_id TEXT,
+    equipped_at TEXT,
+    PRIMARY KEY (user_id, slot)
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS marketplace_purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    item_id TEXT,
+    price INTEGER,
+    purchased_at TEXT
+)
+""")
+
+# =========================
 # DATABASE UPDATE
 # =========================
 for statement in [
@@ -2634,6 +2667,7 @@ async def profile(ctx):
     if len(badge_text) > 1024:
         badge_text = badge_text[:1000] + "..."
     embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
+    embed.add_field(name="🎨 Marketplace", value=get_equipped_items_text(user_id), inline=False)
 
     embed.set_footer(text="Comando disponibile anche come !profilo")
 
@@ -3947,6 +3981,311 @@ async def alerts_list(ctx):
     await ctx.send(embed=embed)
 
 
+
+# =========================
+# MARKETPLACE SYSTEM
+# =========================
+SHOP_CATEGORIES = {
+    "cosmetics": {"emoji": "🎨", "name": "Cosmetici", "desc": "Cornici, temi e personalizzazioni del profilo."},
+    "cases": {"emoji": "📦", "name": "Casse", "desc": "Oggetti collezionabili e pacchetti cosmetici."},
+    "bundles": {"emoji": "💎", "name": "Bundle", "desc": "Set estetici coordinati."},
+    "limited": {"emoji": "⭐", "name": "Edizioni limitate", "desc": "Oggetti rari o stagionali."},
+    "new": {"emoji": "🆕", "name": "Novità", "desc": "Ultimi arrivi nel Marketplace."},
+}
+
+SHOP_ITEMS = {
+    "frame_green": {
+        "emoji": "🟩", "name": "Cornice Green Trader", "category": "cosmetics", "slot": "frame",
+        "price": 750, "rarity": "Comune", "new": True, "limited": False,
+        "desc": "Cornice profilo verde in stile profitto positivo."
+    },
+    "frame_gold": {
+        "emoji": "🟨", "name": "Cornice Gold Market", "category": "cosmetics", "slot": "frame",
+        "price": 2500, "rarity": "Rara", "new": False, "limited": False,
+        "desc": "Cornice dorata per profilo e schede trader."
+    },
+    "theme_dark_exchange": {
+        "emoji": "🌑", "name": "Tema Dark Exchange", "category": "cosmetics", "slot": "theme",
+        "price": 1500, "rarity": "Non comune", "new": True, "limited": False,
+        "desc": "Tema estetico scuro ispirato a una piattaforma di trading."
+    },
+    "theme_stadium": {
+        "emoji": "🏟️", "name": "Tema Stadium Lights", "category": "cosmetics", "slot": "theme",
+        "price": 1800, "rarity": "Non comune", "new": False, "limited": False,
+        "desc": "Tema profilo ispirato alle luci dello stadio."
+    },
+    "title_sharp_trader": {
+        "emoji": "🎯", "name": "Titolo: Sharp Trader", "category": "cosmetics", "slot": "title",
+        "price": 1200, "rarity": "Comune", "new": False, "limited": False,
+        "desc": "Titolo cosmetico da mostrare nel profilo."
+    },
+    "title_market_maker": {
+        "emoji": "📈", "name": "Titolo: Market Maker", "category": "cosmetics", "slot": "title",
+        "price": 3000, "rarity": "Rara", "new": False, "limited": False,
+        "desc": "Titolo premium per chi domina i mercati."
+    },
+    "badge_founder": {
+        "emoji": "🏛️", "name": "Badge Founder", "category": "limited", "slot": "showcase",
+        "price": 5000, "rarity": "Limitata", "new": False, "limited": True,
+        "desc": "Badge cosmetico limitato per i primi sostenitori del bot."
+    },
+    "case_basic": {
+        "emoji": "📦", "name": "Cassa Base", "category": "cases", "slot": None,
+        "price": 1000, "rarity": "Comune", "new": True, "limited": False,
+        "desc": "Cassa cosmetica collezionabile. In questa versione è un oggetto da inventario, non altera il gameplay."
+    },
+    "bundle_night_trader": {
+        "emoji": "💎", "name": "Bundle Night Trader", "category": "bundles", "slot": "bundle",
+        "price": 6500, "rarity": "Epica", "new": True, "limited": False,
+        "desc": "Bundle estetico collezionabile per il profilo trader."
+    },
+}
+
+EQUIPMENT_SLOTS = {
+    "frame": "Cornice",
+    "theme": "Tema",
+    "title": "Titolo",
+    "showcase": "Badge vetrina",
+    "bundle": "Bundle",
+}
+
+
+def get_shop_item(item_id):
+    return SHOP_ITEMS.get(str(item_id).lower().strip())
+
+
+def user_owns_item(user_id, item_id):
+    c.execute("SELECT quantity FROM user_inventory WHERE user_id=? AND item_id=?", (str(user_id), str(item_id)))
+    row = c.fetchone()
+    return bool(row and (row[0] or 0) > 0)
+
+
+def get_equipped_items(user_id):
+    c.execute("SELECT slot, item_id FROM user_equipment WHERE user_id=?", (str(user_id),))
+    return {slot: item_id for slot, item_id in c.fetchall()}
+
+
+def get_equipped_items_text(user_id):
+    equipped = get_equipped_items(user_id)
+    if not equipped:
+        return "Nessun cosmetico equipaggiato."
+
+    lines = []
+    for slot, label in EQUIPMENT_SLOTS.items():
+        item_id = equipped.get(slot)
+        if not item_id:
+            continue
+        item = SHOP_ITEMS.get(item_id)
+        if not item:
+            continue
+        lines.append(f"**{label}:** {item['emoji']} {item['name']}")
+
+    return "\n".join(lines) if lines else "Nessun cosmetico equipaggiato."
+
+
+def build_shop_item_line(item_id, item):
+    slot = EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario"
+    tags = []
+    if item.get("new"):
+        tags.append("🆕 Novità")
+    if item.get("limited"):
+        tags.append("⭐ Limitato")
+    tag_text = f" • {' • '.join(tags)}" if tags else ""
+    return (
+        f"`{item_id}` — {item['emoji']} **{item['name']}**\n"
+        f"💰 {item['price']} crediti • 🏷️ {item['rarity']} • 🎛️ {slot}{tag_text}\n"
+        f"_{item['desc']}_"
+    )
+
+
+@bot.command(name="shop", aliases=["marketplace", "negozio"])
+async def shop(ctx, category: str = None):
+    if not category:
+        embed = discord.Embed(
+            title="🛒 Marketplace",
+            description="Spendi i crediti in oggetti cosmetici e collezionabili. Nessun oggetto dà vantaggi nel trading.",
+            color=COLOR_PURPLE
+        )
+        for key, data in SHOP_CATEGORIES.items():
+            count = sum(1 for item in SHOP_ITEMS.values() if item["category"] == key or (key == "new" and item.get("new")) or (key == "limited" and item.get("limited")))
+            embed.add_field(
+                name=f"{data['emoji']} {data['name']}",
+                value=f"{data['desc']}\n`!shop {key}` • {count} oggetti",
+                inline=False
+            )
+        embed.set_footer(text="Comandi: !buyitem item_id • !inventory • !equip item_id")
+        await ctx.send(embed=embed)
+        return
+
+    category = category.lower().strip()
+    if category not in SHOP_CATEGORIES:
+        await ctx.send("❌ Categoria non valida. Usa `!shop` per vedere le categorie disponibili.")
+        return
+
+    if category == "new":
+        items = [(item_id, item) for item_id, item in SHOP_ITEMS.items() if item.get("new")]
+    elif category == "limited":
+        items = [(item_id, item) for item_id, item in SHOP_ITEMS.items() if item.get("limited")]
+    else:
+        items = [(item_id, item) for item_id, item in SHOP_ITEMS.items() if item.get("category") == category]
+
+    data = SHOP_CATEGORIES[category]
+    embed = discord.Embed(
+        title=f"{data['emoji']} {data['name']}",
+        description=data["desc"],
+        color=COLOR_PURPLE
+    )
+
+    if not items:
+        embed.add_field(name="📭 Nessun oggetto", value="Questa categoria è vuota.", inline=False)
+    else:
+        for item_id, item in items[:12]:
+            embed.add_field(name=f"{item['emoji']} {item['name']}", value=build_shop_item_line(item_id, item), inline=False)
+
+    embed.set_footer(text="Acquista con !buyitem item_id")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="buyitem", aliases=["compraitem", "buycosmetic"])
+async def buyitem(ctx, item_id: str = None):
+    user_id = str(ctx.author.id)
+    if not item_id:
+        await ctx.send("❌ Devi indicare l'ID oggetto. Esempio: `!buyitem frame_green`")
+        return
+
+    item_id = item_id.lower().strip()
+    item = get_shop_item(item_id)
+    if not item:
+        await ctx.send("❌ Oggetto non trovato. Usa `!shop` per vedere il Marketplace.")
+        return
+
+    if user_owns_item(user_id, item_id):
+        await ctx.send("❌ Possiedi già questo oggetto.")
+        return
+
+    balance = get_user(user_id)
+    price = int(item["price"])
+    if balance < price:
+        await ctx.send(f"❌ Crediti insufficienti. Prezzo: **{price}**, saldo: **{balance}**.")
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    c.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (price, user_id))
+    c.execute("""
+        INSERT INTO user_inventory (user_id, item_id, quantity, purchased_at)
+        VALUES (?, ?, 1, ?)
+    """, (user_id, item_id, now))
+    c.execute("""
+        INSERT INTO marketplace_purchases (user_id, item_id, price, purchased_at)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, item_id, price, now))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    embed = discord.Embed(
+        title="✅ Acquisto completato",
+        description=f"Hai acquistato {item['emoji']} **{item['name']}**.",
+        color=COLOR_GREEN
+    )
+    embed.add_field(name="💰 Prezzo", value=f"{price} crediti", inline=True)
+    embed.add_field(name="💳 Saldo residuo", value=str(get_user(user_id)), inline=True)
+    if item.get("slot"):
+        embed.add_field(name="🎛️ Equipaggia", value=f"`!equip {item_id}`", inline=False)
+    embed.set_footer(text="Gli oggetti Marketplace sono solo cosmetici: nessun vantaggio competitivo.")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="inventory", aliases=["inventario", "items"])
+async def inventory(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    user_id = str(member.id)
+    c.execute("""
+        SELECT item_id, quantity, purchased_at
+        FROM user_inventory
+        WHERE user_id=?
+        ORDER BY purchased_at DESC
+    """, (user_id,))
+    rows = c.fetchall()
+
+    embed = discord.Embed(
+        title=f"🎒 Inventario di {member.display_name}",
+        color=COLOR_BLUE
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="🎛️ Equipaggiati", value=get_equipped_items_text(user_id), inline=False)
+
+    if not rows:
+        embed.add_field(name="📭 Vuoto", value="Nessun oggetto acquistato. Usa `!shop` per aprire il Marketplace.", inline=False)
+    else:
+        lines = []
+        for item_id, quantity, _ in rows[:20]:
+            item = SHOP_ITEMS.get(item_id)
+            if not item:
+                continue
+            qty_text = f" x{quantity}" if quantity and quantity > 1 else ""
+            slot = EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario"
+            lines.append(f"`{item_id}` — {item['emoji']} **{item['name']}**{qty_text} • {slot}")
+        embed.add_field(name="📦 Oggetti", value="\n".join(lines) if lines else "Nessun oggetto valido.", inline=False)
+
+    embed.set_footer(text="Equipaggia con !equip item_id • Rimuovi con !unequip slot")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="equip", aliases=["equipaggia"])
+async def equip(ctx, item_id: str = None):
+    user_id = str(ctx.author.id)
+    if not item_id:
+        await ctx.send("❌ Devi indicare l'ID oggetto. Esempio: `!equip frame_green`")
+        return
+
+    item_id = item_id.lower().strip()
+    item = get_shop_item(item_id)
+    if not item:
+        await ctx.send("❌ Oggetto non trovato.")
+        return
+
+    if not user_owns_item(user_id, item_id):
+        await ctx.send("❌ Non possiedi questo oggetto. Acquistalo prima con `!buyitem item_id`.")
+        return
+
+    slot = item.get("slot")
+    if not slot:
+        await ctx.send("❌ Questo oggetto è solo da inventario e non può essere equipaggiato.")
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    c.execute("""
+        INSERT OR REPLACE INTO user_equipment (user_id, slot, item_id, equipped_at)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, slot, item_id, now))
+    conn.commit()
+
+    await ctx.send(f"✅ Hai equipaggiato {item['emoji']} **{item['name']}** nello slot **{EQUIPMENT_SLOTS.get(slot, slot)}**.")
+
+
+@bot.command(name="unequip", aliases=["rimuoviitem"])
+async def unequip(ctx, slot: str = None):
+    user_id = str(ctx.author.id)
+    if not slot:
+        await ctx.send("❌ Devi indicare lo slot. Slot disponibili: `frame`, `theme`, `title`, `showcase`, `bundle`.")
+        return
+
+    slot = slot.lower().strip()
+    if slot not in EQUIPMENT_SLOTS:
+        await ctx.send("❌ Slot non valido. Slot disponibili: `frame`, `theme`, `title`, `showcase`, `bundle`.")
+        return
+
+    c.execute("DELETE FROM user_equipment WHERE user_id=? AND slot=?", (user_id, slot))
+    removed = c.rowcount
+    conn.commit()
+
+    if removed <= 0:
+        await ctx.send("📭 Non avevi nulla equipaggiato in questo slot.")
+        return
+
+    await ctx.send(f"✅ Slot **{EQUIPMENT_SLOTS[slot]}** svuotato.")
+
+
 # =========================
 # HELP COMMANDS
 # =========================
@@ -4058,6 +4397,18 @@ async def help_command(ctx, section: str = None):
             "`!unfollow @utente`\n"
             "`!following`\n"
             "`!trader @utente`"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🛒 Marketplace",
+        value=(
+            "`!shop` / `!marketplace` / `!negozio`\n"
+            "`!shop cosmetics|cases|bundles|limited|new`\n"
+            "`!buyitem item_id` / `!compraitem`\n"
+            "`!inventory` / `!inventario`\n"
+            "`!equip item_id` / `!equipaggia`\n"
+            "`!unequip slot`"
         ),
         inline=False
     )
