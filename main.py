@@ -433,7 +433,13 @@ def get_market_volume_stats(market_id):
 # =========================
 # DATABASE
 # =========================
-conn = sqlite3.connect("/data/bot.db", check_same_thread=False)
+DB_PATH = os.environ.get("BOT_DB_PATH", "/data/bot.db")
+try:
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+except Exception:
+    DB_PATH = "bot.db"
+
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
@@ -582,6 +588,37 @@ CREATE TABLE IF NOT EXISTS marketplace_purchases (
     item_id TEXT,
     price INTEGER,
     purchased_at TEXT
+)
+""")
+
+# =========================
+# SEASONS DATABASE
+# =========================
+c.execute("""
+CREATE TABLE IF NOT EXISTS seasons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_number INTEGER UNIQUE,
+    name TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    active INTEGER DEFAULT 1
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS season_archives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_number INTEGER,
+    archived_at TEXT,
+    champion_user_id TEXT,
+    champion_net_worth REAL,
+    top3_text TEXT,
+    best_accuracy_user_id TEXT,
+    best_accuracy REAL,
+    most_trades_user_id TEXT,
+    most_trades INTEGER,
+    total_markets INTEGER,
+    total_trades INTEGER
 )
 """)
 
@@ -2420,6 +2457,7 @@ async def portfolio(ctx):
         )
         embed.set_thumbnail(url=ctx.author.display_avatar.url)
         embed.add_field(name="💰 Saldo", value=f"{balance} crediti", inline=False)
+        apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !portafoglio")
         await ctx.send(embed=embed)
         return
 
@@ -2483,7 +2521,7 @@ async def portfolio(ctx):
         description += f"\n\n_Altre {len(rows) - 6} posizioni non mostrate._"
 
     embed.description = description
-    embed.set_footer(text="Comando disponibile anche come !portafoglio")
+    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !portafoglio")
 
     await ctx.send(embed=embed)
 
@@ -2669,7 +2707,7 @@ async def profile(ctx):
     embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
     embed.add_field(name="🎨 Marketplace", value=get_equipped_items_text(user_id), inline=False)
 
-    embed.set_footer(text="Comando disponibile anche come !profilo")
+    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo")
 
     await ctx.send(embed=embed)
 
@@ -2705,10 +2743,18 @@ async def leaderboard(ctx):
 
     for i, (user_id, balance, open_value, net_worth) in enumerate(ranking[:10], start=1):
         medal = medals[i - 1] if i <= 3 else f"#{i}"
+        equipped = get_equipped_items(user_id)
+        title_item = SHOP_ITEMS.get(equipped.get("title")) if equipped.get("title") else None
+        showcase_item = SHOP_ITEMS.get(equipped.get("showcase")) if equipped.get("showcase") else None
+        cosmetic_line = ""
+        if title_item:
+            cosmetic_line += f"\n🎖️ {title_item['emoji']} {title_item['name']}"
+        if showcase_item:
+            cosmetic_line += f"\n🎨 {showcase_item['emoji']} {showcase_item['name']}"
         embed.add_field(
             name=f"{medal} Posizione {i}",
             value=(
-                f"👤 <@{user_id}>\n"
+                f"👤 <@{user_id}>{cosmetic_line}\n"
                 f"💼 Patrimonio: **{net_worth:.0f}**\n"
                 f"💰 Saldo: {balance}\n"
                 f"📈 Posizioni aperte: {open_value:.0f}"
@@ -2732,12 +2778,7 @@ async def live(ctx):
 
 
 async def live_sportmonks(ctx):
-    status, data = sportmonks_get(
-        "fixtures/live",
-        params={
-            "include": "participants;scores;events.type;state;league"
-        }
-    )
+    status, data = sportmonks_live_payload()
 
     if status != 200:
         await ctx.send("⚠️ Sportmonks non disponibile ora. Uso il fallback football-data.org.")
@@ -4083,6 +4124,92 @@ def get_equipped_items_text(user_id):
     return "\n".join(lines) if lines else "Nessun cosmetico equipaggiato."
 
 
+def get_cosmetic_style(user_id):
+    """Trasforma gli oggetti equipaggiati in effetti grafici reali sugli embed."""
+    equipped = get_equipped_items(user_id)
+    style = {
+        "color": None,
+        "title_prefix": "",
+        "description_prefix": "",
+        "footer_suffix": "",
+        "author_suffix": "",
+        "showcase": "",
+    }
+
+    frame_id = equipped.get("frame")
+    theme_id = equipped.get("theme")
+    title_id = equipped.get("title")
+    showcase_id = equipped.get("showcase")
+    bundle_id = equipped.get("bundle")
+
+    if frame_id == "frame_green":
+        style["color"] = COLOR_GREEN
+        style["title_prefix"] += "🟩 "
+        style["footer_suffix"] += " • Cornice Green Trader"
+    elif frame_id == "frame_gold":
+        style["color"] = COLOR_GOLD
+        style["title_prefix"] += "🟨 "
+        style["footer_suffix"] += " • Cornice Gold Market"
+
+    if theme_id == "theme_dark_exchange":
+        style["color"] = style["color"] or COLOR_PURPLE
+        style["description_prefix"] += "🌑 **Tema Dark Exchange attivo**\n"
+        style["footer_suffix"] += " • Tema Dark Exchange"
+    elif theme_id == "theme_stadium":
+        style["color"] = style["color"] or COLOR_CYAN
+        style["description_prefix"] += "🏟️ **Tema Stadium Lights attivo**\n"
+        style["footer_suffix"] += " • Tema Stadium Lights"
+
+    if title_id and title_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[title_id]
+        style["author_suffix"] = f" • {item['emoji']} {item['name'].replace('Titolo: ', '')}"
+        style["showcase"] += f"{item['emoji']} **{item['name']}**\n"
+
+    if showcase_id and showcase_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[showcase_id]
+        style["showcase"] += f"{item['emoji']} **{item['name']}**\n"
+
+    if bundle_id == "bundle_night_trader":
+        style["color"] = 0x111827
+        style["description_prefix"] += "💎 **Bundle Night Trader equipaggiato**\n"
+        style["footer_suffix"] += " • Bundle Night Trader"
+
+    return style
+
+
+def apply_cosmetics_to_embed(embed, user_id, member=None, base_footer=None):
+    """Applica colore, prefissi, vetrina e footer cosmetici a un embed esistente."""
+    style = get_cosmetic_style(user_id)
+
+    if style["color"] is not None:
+        embed.color = discord.Color(style["color"])
+
+    if style["title_prefix"] and embed.title:
+        embed.title = f"{style['title_prefix']}{embed.title}"
+
+    if style["description_prefix"]:
+        embed.description = f"{style['description_prefix']}{embed.description or ''}"
+
+    if member is not None and style["author_suffix"]:
+        try:
+            embed.set_author(name=f"{member.display_name}{style['author_suffix']}", icon_url=member.display_avatar.url)
+        except Exception:
+            pass
+
+    if style["showcase"]:
+        value = style["showcase"].strip()
+        if value:
+            embed.add_field(name="🎨 Vetrina cosmetica", value=value[:1024], inline=False)
+
+    footer = base_footer or ""
+    if style["footer_suffix"]:
+        footer = f"{footer}{style['footer_suffix']}" if footer else style["footer_suffix"].lstrip(" •")
+    if footer:
+        embed.set_footer(text=footer[:2048])
+
+    return embed
+
+
 def build_shop_item_line(item_id, item):
     slot = EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario"
     tags = []
@@ -4287,6 +4414,183 @@ async def unequip(ctx, slot: str = None):
 
 
 # =========================
+# SEASON SYSTEM
+# =========================
+def ensure_active_season():
+    now = datetime.now(timezone.utc).isoformat()
+    c.execute("SELECT season_number FROM seasons WHERE active=1 ORDER BY season_number DESC LIMIT 1")
+    row = c.fetchone()
+    if row:
+        return int(row[0])
+
+    c.execute("SELECT MAX(season_number) FROM seasons")
+    last = c.fetchone()[0] or 0
+    season_number = int(last) + 1
+    c.execute(
+        "INSERT INTO seasons (season_number, name, started_at, ended_at, active) VALUES (?, ?, ?, NULL, 1)",
+        (season_number, f"Stagione {season_number}", now)
+    )
+    conn.commit()
+    return season_number
+
+
+def build_current_ranking(limit=3):
+    c.execute("SELECT user_id, balance FROM users")
+    users = c.fetchall()
+    ranking = []
+    for user_id, balance in users:
+        _, open_value, _, _ = calculate_user_open_value(user_id)
+        ranking.append((user_id, float(balance or 0), float(open_value or 0), float((balance or 0) + (open_value or 0))))
+    ranking.sort(key=lambda x: x[3], reverse=True)
+    return ranking[:limit]
+
+
+def get_best_accuracy_user():
+    c.execute("SELECT DISTINCT user_id FROM trades")
+    candidates = [r[0] for r in c.fetchall()]
+    best_user = None
+    best_acc = 0.0
+    for user_id in candidates:
+        metrics = get_user_metrics(user_id)
+        if metrics["resolved_markets"] >= 1 and metrics["accuracy"] >= best_acc:
+            best_user = user_id
+            best_acc = float(metrics["accuracy"] or 0)
+    return best_user, best_acc
+
+
+def archive_current_season():
+    season_number = ensure_active_season()
+    now = datetime.now(timezone.utc).isoformat()
+    top3 = build_current_ranking(3)
+    champion_user_id = top3[0][0] if top3 else None
+    champion_net_worth = top3[0][3] if top3 else 0
+    top3_text = "\n".join(
+        f"#{idx} <@{uid}> — {net:.0f} crediti"
+        for idx, (uid, _bal, _open, net) in enumerate(top3, start=1)
+    ) or "Nessun partecipante"
+
+    best_accuracy_user_id, best_accuracy = get_best_accuracy_user()
+
+    c.execute("SELECT user_id, COUNT(*) FROM trades GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 1")
+    row = c.fetchone()
+    most_trades_user_id = row[0] if row else None
+    most_trades = int(row[1]) if row else 0
+
+    c.execute("SELECT COUNT(*) FROM markets")
+    total_markets = int(c.fetchone()[0] or 0)
+    c.execute("SELECT COUNT(*) FROM trades")
+    total_trades = int(c.fetchone()[0] or 0)
+
+    c.execute("UPDATE seasons SET ended_at=?, active=0 WHERE season_number=?", (now, season_number))
+    c.execute("""
+        INSERT INTO season_archives (
+            season_number, archived_at, champion_user_id, champion_net_worth, top3_text,
+            best_accuracy_user_id, best_accuracy, most_trades_user_id, most_trades, total_markets, total_trades
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        season_number, now, champion_user_id, champion_net_worth, top3_text,
+        best_accuracy_user_id, best_accuracy, most_trades_user_id, most_trades, total_markets, total_trades
+    ))
+    new_season = season_number + 1
+    c.execute(
+        "INSERT INTO seasons (season_number, name, started_at, ended_at, active) VALUES (?, ?, ?, NULL, 1)",
+        (new_season, f"Stagione {new_season}", now)
+    )
+    conn.commit()
+    return season_number, new_season, top3_text, champion_user_id
+
+
+def reset_seasonal_data(starting_balance=1000):
+    """Resetta solo la progressione stagionale. Marketplace e cosmetici restano intatti."""
+    c.execute("UPDATE users SET balance=?", (int(starting_balance),))
+    c.execute("DELETE FROM trades")
+    c.execute("DELETE FROM markets")
+    c.execute("DELETE FROM price_history")
+    c.execute("DELETE FROM wealth_history")
+    c.execute("DELETE FROM personal_alerts")
+    c.execute("DELETE FROM user_badges")
+    c.execute("UPDATE user_stats SET xp=0, current_streak=0, best_streak=0, last_daily=NULL")
+    conn.commit()
+
+
+@bot.command(name="seasonreset")
+@admin_only()
+async def seasonreset(ctx, starting_balance: int = 1000):
+    await delete_admin_command_message(ctx)
+    if starting_balance < 0:
+        await ctx.send("❌ Il saldo iniziale non può essere negativo.")
+        return
+
+    closed_season, new_season, top3_text, champion_user_id = archive_current_season()
+    reset_seasonal_data(starting_balance)
+
+    embed = discord.Embed(
+        title="🔄 Reset stagione completato",
+        description=(
+            f"La **Stagione {closed_season}** è stata archiviata.\n"
+            f"È iniziata la **Stagione {new_season}**.\n\n"
+            "Gli acquisti Marketplace, inventario e cosmetici equipaggiati sono stati conservati."
+        ),
+        color=COLOR_GOLD
+    )
+    embed.add_field(name="🏆 Top 3 archiviata", value=top3_text[:1024], inline=False)
+    embed.add_field(name="💰 Saldo iniziale", value=f"{starting_balance} crediti", inline=True)
+    embed.add_field(name="🛡️ Conservato", value="Shop, inventario, cosmetici, equipaggiamenti", inline=False)
+    embed.add_field(name="♻️ Reset", value="Crediti, XP, livelli, badge stagionali, streak, statistiche, mercati, portafogli e storico prezzi", inline=False)
+    await ctx.send(embed=embed)
+    await log_admin_activity(ctx, "🔄 !seasonreset", details=f"Archiviata stagione {closed_season}; avviata stagione {new_season}; saldo iniziale {starting_balance}", color=COLOR_GOLD)
+
+
+@bot.command(name="stagione", aliases=["season"])
+async def stagione(ctx):
+    current = ensure_active_season()
+    c.execute("SELECT started_at FROM seasons WHERE season_number=?", (current,))
+    row = c.fetchone()
+    started_at = row[0] if row else "N/D"
+
+    embed = discord.Embed(
+        title=f"📖 Stagione {current}",
+        description="Stagione corrente e archivio delle stagioni concluse.",
+        color=COLOR_CYAN
+    )
+    embed.add_field(name="🟢 Stato", value="Attiva", inline=True)
+    embed.add_field(name="📅 Inizio", value=str(started_at).replace("T", " ")[:19], inline=True)
+
+    top3 = build_current_ranking(3)
+    if top3:
+        value = "\n".join(f"#{idx} <@{uid}> — **{net:.0f}** crediti" for idx, (uid, _bal, _open, net) in enumerate(top3, start=1))
+    else:
+        value = "Nessun partecipante."
+    embed.add_field(name="🏆 Top 3 corrente", value=value, inline=False)
+
+    c.execute("""
+        SELECT season_number, champion_user_id, champion_net_worth, top3_text, total_markets, total_trades
+        FROM season_archives
+        ORDER BY season_number DESC
+        LIMIT 3
+    """)
+    archives = c.fetchall()
+    if archives:
+        for season_number, champion_id, champion_net, top3_text, total_markets, total_trades in archives:
+            champion = f"<@{champion_id}>" if champion_id else "N/D"
+            embed.add_field(
+                name=f"📜 Stagione {season_number} archiviata",
+                value=(
+                    f"🏆 Campione: {champion} — **{float(champion_net or 0):.0f}** crediti\n"
+                    f"📊 Mercati: {total_markets or 0} • Trade: {total_trades or 0}\n"
+                    f"{str(top3_text or '')[:500]}"
+                ),
+                inline=False
+            )
+    else:
+        embed.add_field(name="📜 Archivio", value="Nessuna stagione archiviata.", inline=False)
+
+    embed.set_footer(text="Il reset stagionale è disponibile solo agli admin con !seasonreset")
+    await ctx.send(embed=embed)
+
+
+# =========================
 # HELP COMMANDS
 # =========================
 @bot.command(name="help", aliases=["aiuto"])
@@ -4335,7 +4639,8 @@ async def help_command(ctx, section: str = None):
             value=(
                 "`!addbalance @utente importo`\n"
                 "`!removebalance @utente importo`\n"
-                "`!resetuser @utente`"
+                "`!resetuser @utente`\n"
+                "`!seasonreset [saldo_iniziale]`"
             ),
             inline=False
         )
@@ -4354,7 +4659,8 @@ async def help_command(ctx, section: str = None):
             "`!daily` / `!giornaliero`\n"
             "`!profile` / `!profilo`\n"
             "`!portfolio` / `!portafoglio`\n"
-            "`!leaderboard` / `!classifica`"
+            "`!leaderboard` / `!classifica`\n"
+            "`!stagione`"
         ),
         inline=False
     )
@@ -4516,6 +4822,26 @@ def sportmonks_get(path, params=None):
     final_params.setdefault("api_token", SPORTMONKS_API_TOKEN)
 
     return request_json(url, params=final_params, timeout=12)
+
+
+def safe_int(value):
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def sportmonks_live_payload():
+    """Recupera le partite live evitando l'errore 422 fixtureId non intero."""
+    include = "participants;scores;events.type;state;league"
+    status, data = sportmonks_get("fixtures/live", params={"include": include})
+
+    # Alcuni piani/endpoints Sportmonks rispondono 422 chiedendo fixtureId.
+    # In quel caso usiamo l'endpoint live score corretto e non facciamo crashare il loop.
+    if status == 422 and "fixture" in str(data).lower():
+        status, data = sportmonks_get("livescores/inplay", params={"include": include})
+
+    return status, data
 
 
 # Filtro intelligente GNews/Gazzetta: calcio mondiale, non cronaca/politica.
@@ -4767,10 +5093,7 @@ async def gazzetta_live_loop():
                 await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
                 continue
 
-            status, data = sportmonks_get(
-                "fixtures/live",
-                params={"include": "participants;scores;events.type;state;league"}
-            )
+            status, data = sportmonks_live_payload()
 
             if status != 200:
                 print(f"[GAZZETTA LIVE] Sportmonks status {status}: {data}")
@@ -4781,7 +5104,10 @@ async def gazzetta_live_loop():
                 home, away = sportmonks_fixture_teams(fixture)
                 score = sportmonks_fixture_score(fixture)
                 league = sportmonks_fixture_league(fixture)
-                fixture_id = fixture.get("id") or f"{home}-{away}"
+                fixture_id = safe_int(fixture.get("id"))
+                if fixture_id is None:
+                    # Fix Gazzetta Live/Sportmonks: niente richieste/eventi con fixtureId vuoto o non numerico.
+                    continue
 
                 for ev in fixture.get("events", []) or []:
                     label = sportmonks_event_label(ev)
