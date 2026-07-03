@@ -2770,14 +2770,21 @@ async def leaderboard(ctx):
 # LIVE / ESPN SCOREBOARD
 # =========================
 ESPN_SOCCER_LEAGUES = {
-    "ita.1": "Serie A",
-    "eng.1": "Premier League",
-    "esp.1": "La Liga",
-    "ger.1": "Bundesliga",
-    "fra.1": "Ligue 1",
-    "uefa.champions": "Champions League",
-    "uefa.europa": "Europa League",
-    "uefa.europa.conf": "Conference League",
+    # Campionati
+    "ita.1": "Serie A",                 # SA
+    "eng.1": "Premier League",          # PL
+    "esp.1": "LaLiga",                  # PD
+    "ger.1": "Bundesliga",              # BL1
+    "fra.1": "Ligue 1",                 # FL1
+    "ned.1": "Eredivisie",              # DED
+    "por.1": "Primeira Liga",           # PPL
+    "eng.2": "Championship",           # ELC
+    "bra.1": "Brasileirão Série A",     # BSA
+
+    # Competizioni UEFA/FIFA
+    "uefa.champions": "Champions League",   # CL
+    "uefa.euro": "European Championship",   # EC
+    "fifa.world": "FIFA World Cup",         # WC
 }
 
 ESPN_HEADERS = {
