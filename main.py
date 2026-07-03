@@ -3266,6 +3266,57 @@ async def testespn(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.command()
+@admin_only()
+async def debugespnsubs(ctx):
+    matches, diagnostics = fetch_espn_live_matches()
+
+    if not matches:
+        await ctx.send("❌ Nessuna partita live ESPN trovata.")
+        return
+
+    league_code = matches[0]["league_code"]
+    event_id = str(matches[0]["event_id"])
+
+    status, data = fetch_espn_scoreboard(league_code)
+    events = data.get("events") or []
+
+    target = None
+    for event in events:
+        if str(event.get("id")) == event_id:
+            target = event
+            break
+
+    if not target:
+        await ctx.send("❌ Evento ESPN non trovato.")
+        return
+
+    import json
+
+    comps = target.get("competitions") or []
+    comp = comps[0] if comps else {}
+
+    # Cerca ovunque nel JSON della partita, non solo in details
+    raw_target = json.dumps(target, ensure_ascii=False, indent=2)
+    keywords = ["sub", "substitution", "substitute", "replace", "playerin", "playerout", "entr", "bench"]
+
+    found = []
+    for line in raw_target.splitlines():
+        low = line.lower()
+        if any(k in low for k in keywords):
+            found.append(line)
+
+    if not found:
+        await ctx.send("⚠️ Nessun riferimento a sostituzioni trovato nel JSON ESPN.")
+        return
+
+    output = "\n".join(found[:80])
+    if len(output) > 1800:
+        output = output[:1800] + "\n..."
+
+    await ctx.send(f"```json\n{output}\n```")
+
+
 async def live_football_data_fallback(ctx):
     c.execute("""
         SELECT id, question, yes_pool, no_pool, total_pool, match_key
