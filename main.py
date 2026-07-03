@@ -3,6 +3,8 @@ import discord
 import sqlite3
 import requests
 import asyncio
+import html
+import re
 import matplotlib.pyplot as plt
 import io
 import xml.etree.ElementTree as ET
@@ -2796,12 +2798,13 @@ def espn_competitors(event):
     comps = event.get("competitions") or []
     comp = comps[0] if comps else {}
     competitors = comp.get("competitors") or []
-    home = {"name": "Casa", "score": "-"}
-    away = {"name": "Trasferta", "score": "-"}
+    home = {"id": None, "name": "Casa", "score": "-"}
+    away = {"id": None, "name": "Trasferta", "score": "-"}
 
     for team_data in competitors:
         team = team_data.get("team") or {}
         item = {
+            "id": str(team.get("id") or team_data.get("id") or ""),
             "name": team.get("displayName") or team.get("shortDisplayName") or team.get("name") or "Squadra",
             "score": team_data.get("score", "-"),
         }
@@ -2812,6 +2815,105 @@ def espn_competitors(event):
 
     return home, away
 
+
+def espn_event_venue(event):
+    comps = event.get("competitions") or []
+    comp = comps[0] if comps else {}
+    venue = comp.get("venue") or event.get("venue") or {}
+    if not isinstance(venue, dict):
+        return ""
+
+    name = venue.get("fullName") or venue.get("name") or ""
+    address = venue.get("address") or {}
+    city = address.get("city") if isinstance(address, dict) else ""
+
+    if name and city:
+        return f"{name}, {city}"
+    return name or city or ""
+
+
+def _espn_detail_text(detail):
+    parts = []
+    if isinstance(detail, dict):
+        parts.append(str(detail.get("text") or detail.get("displayText") or detail.get("description") or ""))
+        type_data = detail.get("type") or {}
+        if isinstance(type_data, dict):
+            parts.append(str(type_data.get("text") or type_data.get("name") or type_data.get("abbreviation") or ""))
+    return " ".join(p for p in parts if p).lower()
+
+
+def _espn_detail_team_side(detail, home_id, away_id):
+    team = detail.get("team") or {}
+    team_id = ""
+    if isinstance(team, dict):
+        team_id = str(team.get("id") or "")
+    team_id = team_id or str(detail.get("teamId") or detail.get("team_id") or "")
+
+    if team_id and home_id and team_id == str(home_id):
+        return "home"
+    if team_id and away_id and team_id == str(away_id):
+        return "away"
+    return None
+
+
+def espn_event_details_summary(event):
+    comps = event.get("competitions") or []
+    comp = comps[0] if comps else {}
+    details = comp.get("details") or event.get("details") or []
+    home, away = espn_competitors(event)
+    home_id, away_id = home.get("id"), away.get("id")
+
+    cards_y = {"home": 0, "away": 0}
+    cards_r = {"home": 0, "away": 0}
+    subs = {"home": 0, "away": 0}
+    scorers = []
+
+    if not isinstance(details, list):
+        details = []
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        text = _espn_detail_text(detail)
+        side = _espn_detail_team_side(detail, home_id, away_id)
+
+        is_goal = any(k in text for k in ["goal", "gol", "penalty - scored", "own goal"]) and "yellow" not in text and "red" not in text
+        is_yellow = "yellow" in text or "ammon" in text
+        is_red = "red" in text or "espuls" in text
+        is_sub = "substitution" in text or "sostit" in text
+
+        if side and is_yellow:
+            cards_y[side] += 1
+        if side and is_red:
+            cards_r[side] += 1
+        if side and is_sub:
+            subs[side] += 1
+
+        if is_goal:
+            clock = detail.get("clock", {})
+            minute = ""
+            if isinstance(clock, dict):
+                minute = clock.get("displayValue") or clock.get("value") or ""
+            minute = minute or detail.get("displayClock") or detail.get("time") or ""
+            athlete = detail.get("athletes") or detail.get("athlete") or {}
+            scorer = ""
+            if isinstance(athlete, list) and athlete:
+                first = athlete[0] or {}
+                scorer = first.get("displayName") or first.get("shortName") or first.get("name") or ""
+            elif isinstance(athlete, dict):
+                scorer = athlete.get("displayName") or athlete.get("shortName") or athlete.get("name") or ""
+            scorer = scorer or detail.get("headline") or detail.get("text") or "Goal"
+            if minute:
+                scorers.append(f"{minute} {scorer}"[:120])
+            else:
+                scorers.append(str(scorer)[:120])
+
+    return {
+        "yellow": cards_y,
+        "red": cards_r,
+        "subs": subs,
+        "scorers": scorers[:6],
+    }
 
 def espn_event_is_live(event):
     status = event.get("status") or {}
@@ -2853,6 +2955,8 @@ def fetch_espn_live_matches():
                         "home_score": home["score"],
                         "away_score": away["score"],
                         "status": espn_event_status_text(event),
+                        "venue": espn_event_venue(event),
+                        "details": espn_event_details_summary(event),
                     })
         else:
             print(f"[ESPN LIVE] {league_code} status {status}: {data}")
@@ -2883,13 +2987,31 @@ async def live(ctx):
         )
 
         for m in matches[:10]:
+            details = m.get("details") or {}
+            yellow = details.get("yellow") or {}
+            red = details.get("red") or {}
+            subs = details.get("subs") or {}
+            scorers = details.get("scorers") or []
+
+            lines = [
+                f"🏆 {m['league']}",
+                f"📊 Risultato: **{m['home_score']}-{m['away_score']}**",
+                f"⏱️ Stato: **{m['status']}**",
+            ]
+            if m.get("venue"):
+                lines.append(f"🏟️ Stadio: {m['venue']}")
+            if (yellow.get("home") or yellow.get("away")):
+                lines.append(f"🟨 Cartellini: {yellow.get('home', 0)}-{yellow.get('away', 0)}")
+            if (red.get("home") or red.get("away")):
+                lines.append(f"🟥 Espulsioni: {red.get('home', 0)}-{red.get('away', 0)}")
+            if (subs.get("home") or subs.get("away")):
+                lines.append(f"🔄 Cambi: {subs.get('home', 0)}-{subs.get('away', 0)}")
+            if scorers:
+                lines.append("⚽ Marcatori: " + "; ".join(scorers[:4]))
+
             embed.add_field(
                 name=f"⚽ {m['home']} vs {m['away']}",
-                value=(
-                    f"🏆 {m['league']}\n"
-                    f"📊 Risultato: **{m['home_score']}-{m['away_score']}**\n"
-                    f"⏱️ Stato: **{m['status']}**"
-                )[:1024],
+                value="\n".join(lines)[:1024],
                 inline=False
             )
 
@@ -2920,7 +3042,10 @@ async def testespn(ctx):
     embed.add_field(name="Endpoint controllati", value="\n".join(lines)[:1024] or "N/D", inline=False)
 
     if matches:
-        live_lines = [f"{m['league']}: {m['home']} {m['home_score']}-{m['away_score']} {m['away']} ({m['status']})" for m in matches[:8]]
+        live_lines = []
+        for m in matches[:8]:
+            venue = f" • {m['venue']}" if m.get("venue") else ""
+            live_lines.append(f"{m['league']}: {m['home']} {m['home_score']}-{m['away_score']} {m['away']} ({m['status']}){venue}")
         embed.add_field(name="Live", value="\n".join(live_lines)[:1024], inline=False)
 
     embed.set_footer(text="ESPN è un endpoint pubblico non ufficiale: usare sempre con fallback.")
@@ -4874,6 +4999,30 @@ NEWS_BLACKLIST = [
 ]
 
 
+def clean_news_text(value):
+    """Pulisce titoli e descrizioni provenienti da RSS/GNews.
+
+    Risolve entità HTML, apostrofi/virgolette strane, spazi invisibili
+    e piccoli residui di markup che rendono brutti gli embed di #gazzetta.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    for _ in range(2):
+        text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    replacements = {
+        "‘": "'", "’": "'", "‚": "'", "ʼ": "'",
+        "“": '"', "”": '"', "„": '"',
+        "–": "-", "—": "-", "−": "-",
+        " ": " ", "​": "", "﻿": "",
+    }
+    for old, new_value in replacements.items():
+        text = text.replace(old, new_value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _contains_keyword(text, keywords):
     text = text.lower()
     return [kw for kw in keywords if kw.lower() in text]
@@ -4981,11 +5130,11 @@ def parse_rss_items(source_name, xml_text, limit=6):
         if tag not in ("item", "entry"):
             continue
 
-        title = _child_text(node, "title") or "Notizia calcistica"
-        description = _child_text(node, "description") or _child_text(node, "summary") or _child_text(node, "content") or ""
-        url = _first_link(node)
-        guid = _child_text(node, "guid") or _child_text(node, "id") or url or title
-        published = _child_text(node, "pubDate") or _child_text(node, "published") or _child_text(node, "updated")
+        title = clean_news_text(_child_text(node, "title") or "Notizia calcistica")
+        description = clean_news_text(_child_text(node, "description") or _child_text(node, "summary") or _child_text(node, "content") or "")
+        url = clean_news_text(_first_link(node))
+        guid = clean_news_text(_child_text(node, "guid") or _child_text(node, "id") or url or title)
+        published = clean_news_text(_child_text(node, "pubDate") or _child_text(node, "published") or _child_text(node, "updated"))
 
         article = {
             "source": source_name,
@@ -5091,10 +5240,10 @@ def fetch_gnews_sports():
         article = {
             "source": "GNews",
             "external_id": external_id,
-            "title": a.get("title", "Notizia calcistica"),
-            "description": a.get("description") or "",
-            "url": a.get("url") or "",
-            "published_at": a.get("publishedAt") or ""
+            "title": clean_news_text(a.get("title", "Notizia calcistica")),
+            "description": clean_news_text(a.get("description") or ""),
+            "url": clean_news_text(a.get("url") or ""),
+            "published_at": clean_news_text(a.get("publishedAt") or "")
         }
         if is_relevant_football_news(article):
             articles.append(article)
@@ -5132,33 +5281,35 @@ def fetch_api_football_news():
     articles = []
 
     for item in raw_items[:5]:
-        title = item.get("title") or item.get("headline") or "Aggiornamento calcio"
-        url = item.get("url") or item.get("link") or ""
-        external_id = item.get("id") or url or title
+        title = clean_news_text(item.get("title") or item.get("headline") or "Aggiornamento calcio")
+        url = clean_news_text(item.get("url") or item.get("link") or "")
+        external_id = clean_news_text(item.get("id") or url or title)
         articles.append({
             "source": "API-Football",
             "external_id": external_id,
             "title": title,
-            "description": item.get("description") or item.get("summary") or "",
+            "description": clean_news_text(item.get("description") or item.get("summary") or ""),
             "url": url,
-            "published_at": item.get("published_at") or item.get("date") or ""
+            "published_at": clean_news_text(item.get("published_at") or item.get("date") or "")
         })
 
     return articles
 
 
 async def post_news_article(channel, article):
+    title = clean_news_text(article.get("title") or "Notizia calcistica")
+    description = clean_news_text(article.get("description") or "Nuovo aggiornamento disponibile.")
     embed = discord.Embed(
-        title=f"📰 {article['title'][:250]}",
-        description=(article.get("description") or "Nuovo aggiornamento disponibile.")[:1000],
+        title=f"📰 {title[:250]}",
+        description=description[:1000],
         color=COLOR_CYAN,
         timestamp=datetime.now(timezone.utc)
     )
-    embed.add_field(name="Fonte", value=article.get("source", "News"), inline=True)
+    embed.add_field(name="Fonte", value=clean_news_text(article.get("source", "News")), inline=True)
     if article.get("published_at"):
-        embed.add_field(name="Pubblicata", value=str(article["published_at"])[:80], inline=True)
+        embed.add_field(name="Pubblicata", value=clean_news_text(article["published_at"])[:80], inline=True)
     if article.get("url"):
-        embed.add_field(name="Link", value=article["url"][:1024], inline=False)
+        embed.add_field(name="Link", value=clean_news_text(article["url"])[:1024], inline=False)
     if article.get("relevance_score") is not None:
         embed.add_field(name="Rilevanza calcio", value=f"{article.get('relevance_score')} punti", inline=True)
     embed.set_footer(text="Gazzetta • RSS + GNews • filtro calcio mondiale v2.0.2")
@@ -5178,8 +5329,8 @@ async def market_pulse_news_loop():
                 articles = fetch_rss_football_news() + fetch_api_football_news() + fetch_gnews_sports()
 
                 for article in articles:
-                    source = article.get("source", "news")
-                    external_id = article.get("external_id")
+                    source = clean_news_text(article.get("source", "news"))
+                    external_id = clean_news_text(article.get("external_id") or article.get("url") or article.get("title"))
                     if not external_id or is_news_already_seen(source, external_id):
                         continue
 
