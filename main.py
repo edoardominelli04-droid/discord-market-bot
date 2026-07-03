@@ -1463,12 +1463,6 @@ def make_profile_dashboard_image(member, balance, net_worth, xp, trader_level, x
     return buffer
 
 
-# =========================
-# PROFILE CARD PNG
-# =========================
-# v2.0.3: la card PNG del profilo è stata rimossa.
-# !profile usa solo embed Discord.
-# Badge e oggetti Marketplace restano visibili nell'embed, non in immagini allegate.
 
 
 # =========================
@@ -2676,25 +2670,6 @@ async def profile(ctx):
     rank = calculate_server_rank(user_id)
     rank_text = f"#{rank}" if rank else "N/D"
 
-    badge_ids = get_active_badges(user_id)
-    metrics = {
-        "balance": balance,
-        "net_worth": net_worth,
-        "open_positions": open_positions,
-        "total_trades": total_trades,
-        "accuracy": accuracy,
-        "current_streak": current_streak,
-        "best_streak": best_streak,
-        "won_markets": won_markets,
-        "lost_markets": lost_markets,
-        "resolved_markets": resolved_markets,
-        "rank": rank,
-    }
-
-    # v2.0.3: card PNG temporaneamente disattivata.
-    # Il profilo torna a usare solo embed Discord; Marketplace/cosmetici restano
-    # disponibili per futura integrazione grafica senza generare immagini PNG.
-
     color = COLOR_BLUE
     profit_emoji = "🟢" if open_profit >= 0 else "🔴"
 
@@ -2725,13 +2700,14 @@ async def profile(ctx):
     embed.add_field(name="❌ Mercati persi", value=str(lost_markets), inline=True)
     embed.add_field(name="📊 Mercati risolti", value=str(resolved_markets), inline=True)
 
+    badge_ids = get_active_badges(user_id)
     badge_text = " • ".join(format_badge(b) for b in badge_ids[:12]) if badge_ids else "Nessun badge sbloccato."
     if len(badge_text) > 1024:
         badge_text = badge_text[:1000] + "..."
     embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
     embed.add_field(name="🎨 Marketplace", value=get_equipped_items_text(user_id), inline=False)
 
-    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo • Fallback embed")
+    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo")
 
     await ctx.send(embed=embed)
 
