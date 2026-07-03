@@ -2770,21 +2770,21 @@ async def leaderboard(ctx):
 # LIVE / ESPN SCOREBOARD
 # =========================
 ESPN_SOCCER_LEAGUES = {
-    # Campionati
-    "ita.1": "Serie A",                 # SA
-    "eng.1": "Premier League",          # PL
-    "esp.1": "LaLiga",                  # PD
-    "ger.1": "Bundesliga",              # BL1
-    "fra.1": "Ligue 1",                 # FL1
-    "ned.1": "Eredivisie",              # DED
-    "por.1": "Primeira Liga",           # PPL
-    "eng.2": "Championship",           # ELC
-    "bra.1": "Brasileirão Série A",     # BSA
-
-    # Competizioni UEFA/FIFA
-    "uefa.champions": "Champions League",   # CL
-    "uefa.euro": "European Championship",   # EC
-    "fifa.world": "FIFA World Cup",         # WC
+    # Stessi tornei principali previsti da football-data.org, dove ESPN espone lo scoreboard pubblico.
+    "fifa.world": "FIFA World Cup",              # WC
+    "uefa.champions": "Champions League",       # CL
+    "ger.1": "Bundesliga",                      # BL1
+    "ned.1": "Eredivisie",                      # DED
+    "bra.1": "Brasileirão Série A",             # BSA
+    "esp.1": "La Liga",                         # PD
+    "fra.1": "Ligue 1",                         # FL1
+    "eng.2": "Championship",                    # ELC
+    "por.1": "Primeira Liga",                   # PPL
+    "uefa.euro": "European Championship",       # EC
+    "ita.1": "Serie A",                         # SA
+    "eng.1": "Premier League",                  # PL
+    "uefa.europa": "Europa League",
+    "uefa.europa.conf": "Conference League",
 }
 
 ESPN_HEADERS = {
@@ -2840,13 +2840,24 @@ def espn_event_venue(event):
 
 
 def _espn_detail_text(detail):
+    """Testo grezzo di un evento ESPN, usato come fallback."""
     parts = []
     if isinstance(detail, dict):
-        parts.append(str(detail.get("text") or detail.get("displayText") or detail.get("description") or ""))
+        for key in ["text", "displayText", "description", "headline", "shortText"]:
+            value = detail.get(key)
+            if value:
+                parts.append(str(value))
         type_data = detail.get("type") or {}
         if isinstance(type_data, dict):
-            parts.append(str(type_data.get("text") or type_data.get("name") or type_data.get("abbreviation") or ""))
-    return " ".join(p for p in parts if p).lower()
+            for key in ["text", "name", "abbreviation", "description", "shortDetail"]:
+                value = type_data.get(key)
+                if value:
+                    parts.append(str(value))
+    return " ".join(p for p in parts if p).strip()
+
+
+def _espn_detail_search_text(detail):
+    return _espn_detail_text(detail).lower()
 
 
 def _espn_detail_team_side(detail, home_id, away_id):
@@ -2863,6 +2874,94 @@ def _espn_detail_team_side(detail, home_id, away_id):
     return None
 
 
+def _espn_event_minute(detail):
+    clock = detail.get("clock") or {}
+    minute = ""
+    if isinstance(clock, dict):
+        minute = clock.get("displayValue") or clock.get("displayClock") or clock.get("value") or ""
+    minute = minute or detail.get("displayClock") or detail.get("time") or detail.get("minute") or ""
+    minute = str(minute).strip()
+    if minute and minute.isdigit():
+        minute = f"{minute}'"
+    return minute
+
+
+def _espn_person_name(obj):
+    if not isinstance(obj, dict):
+        return ""
+    for key in ["displayName", "shortName", "fullName", "name", "athleteName"]:
+        value = obj.get(key)
+        if value:
+            return str(value).strip()
+    athlete = obj.get("athlete") or obj.get("player")
+    if isinstance(athlete, dict):
+        return _espn_person_name(athlete)
+    return ""
+
+
+def _espn_detail_people(detail):
+    """Estrae nomi calciatori da varie strutture ESPN possibili."""
+    people = []
+
+    for key in ["athletes", "participants", "players", "competitors"]:
+        value = detail.get(key)
+        if isinstance(value, list):
+            for item in value:
+                name = _espn_person_name(item)
+                if name and name not in people:
+                    people.append(name)
+        elif isinstance(value, dict):
+            name = _espn_person_name(value)
+            if name and name not in people:
+                people.append(name)
+
+    for key in ["athlete", "participant", "player"]:
+        value = detail.get(key)
+        if isinstance(value, dict):
+            name = _espn_person_name(value)
+            if name and name not in people:
+                people.append(name)
+
+    return people
+
+
+def _espn_clean_event_fallback(text):
+    text = str(text or "").strip()
+    if not text:
+        return "Evento"
+    # Evita fallback troppo generici quando ESPN non espone il nome.
+    low = text.lower()
+    if low in {"goal", "gol", "yellow card", "red card", "substitution"}:
+        return text.title()
+    return text[:90]
+
+
+def _espn_format_event_line(minute, label):
+    label = _espn_clean_event_fallback(label)
+    return f"{minute} {label}".strip()[:140]
+
+
+def _espn_substitution_line(detail, minute, fallback):
+    people = _espn_detail_people(detail)
+    if len(people) >= 2:
+        # Di solito ESPN mette entrante e uscente tra gli atleti/partecipanti.
+        return _espn_format_event_line(minute, f"Entra {people[0]} • Esce {people[1]}")
+    if len(people) == 1:
+        return _espn_format_event_line(minute, people[0])
+    return _espn_format_event_line(minute, fallback or "Sostituzione")
+
+
+def _espn_penalty_result(text):
+    low = (text or "").lower()
+    if any(k in low for k in ["saved", "parato", "save"]):
+        return "❌ Parato"
+    if any(k in low for k in ["missed", "fuori", "off target"]):
+        return "❌ Fuori"
+    if any(k in low for k in ["scored", "made", "goal", "gol"]):
+        return "✅ Goal"
+    return "🎯 Rigore"
+
+
 def espn_event_details_summary(event):
     comps = event.get("competitions") or []
     comp = comps[0] if comps else {}
@@ -2872,8 +2971,13 @@ def espn_event_details_summary(event):
 
     cards_y = {"home": 0, "away": 0}
     cards_r = {"home": 0, "away": 0}
-    subs = {"home": 0, "away": 0}
+    subs_count = {"home": 0, "away": 0}
+
     scorers = []
+    yellows = []
+    reds = []
+    substitutions = []
+    penalties = []
 
     if not isinstance(details, list):
         details = []
@@ -2881,45 +2985,62 @@ def espn_event_details_summary(event):
     for detail in details:
         if not isinstance(detail, dict):
             continue
-        text = _espn_detail_text(detail)
-        side = _espn_detail_team_side(detail, home_id, away_id)
 
-        is_goal = any(k in text for k in ["goal", "gol", "penalty - scored", "own goal"]) and "yellow" not in text and "red" not in text
+        raw_text = _espn_detail_text(detail)
+        text = raw_text.lower()
+        side = _espn_detail_team_side(detail, home_id, away_id)
+        minute = _espn_event_minute(detail)
+        people = _espn_detail_people(detail)
+
         is_yellow = "yellow" in text or "ammon" in text
         is_red = "red" in text or "espuls" in text
-        is_sub = "substitution" in text or "sostit" in text
+        is_sub = "substitution" in text or "sostit" in text or "sub " in text
+        is_penalty = "penalty" in text or "rigor" in text
+        is_goal = any(k in text for k in ["goal", "gol", "own goal", "penalty - scored"]) and not is_yellow and not is_red
 
         if side and is_yellow:
             cards_y[side] += 1
         if side and is_red:
             cards_r[side] += 1
         if side and is_sub:
-            subs[side] += 1
+            subs_count[side] += 1
 
         if is_goal:
-            clock = detail.get("clock", {})
-            minute = ""
-            if isinstance(clock, dict):
-                minute = clock.get("displayValue") or clock.get("value") or ""
-            minute = minute or detail.get("displayClock") or detail.get("time") or ""
-            athlete = detail.get("athletes") or detail.get("athlete") or {}
-            scorer = ""
-            if isinstance(athlete, list) and athlete:
-                first = athlete[0] or {}
-                scorer = first.get("displayName") or first.get("shortName") or first.get("name") or ""
-            elif isinstance(athlete, dict):
-                scorer = athlete.get("displayName") or athlete.get("shortName") or athlete.get("name") or ""
-            scorer = scorer or detail.get("headline") or detail.get("text") or "Goal"
-            if minute:
-                scorers.append(f"{minute} {scorer}"[:120])
+            name = people[0] if people else ""
+            label = name or raw_text or "Goal"
+            if is_penalty and name:
+                label = f"{name} (rig.)"
+            scorers.append(_espn_format_event_line(minute, label))
+
+        if is_yellow:
+            label = (people[0] if people else raw_text or "Ammonizione")
+            yellows.append(_espn_format_event_line(minute, label))
+
+        if is_red:
+            label = (people[0] if people else raw_text or "Espulsione")
+            reds.append(_espn_format_event_line(minute, label))
+
+        if is_sub:
+            substitutions.append(_espn_substitution_line(detail, minute, raw_text))
+
+        # Se ESPN invia una sequenza rigori, la mostriamo in sezione dedicata.
+        if is_penalty and not is_yellow and not is_red:
+            name = people[0] if people else raw_text or "Rigore"
+            result = _espn_penalty_result(raw_text)
+            if name and result not in name:
+                penalties.append(_espn_format_event_line(minute, f"{result} {name}"))
             else:
-                scorers.append(str(scorer)[:120])
+                penalties.append(_espn_format_event_line(minute, result))
 
     return {
         "yellow": cards_y,
         "red": cards_r,
-        "subs": subs,
-        "scorers": scorers[:6],
+        "subs": subs_count,
+        "scorers": scorers[:8],
+        "yellows": yellows[:8],
+        "reds": reds[:8],
+        "substitutions": substitutions[:8],
+        "penalties": penalties[:10],
     }
 
 def espn_event_is_live(event):
@@ -2931,14 +3052,60 @@ def espn_event_is_live(event):
 
 
 def espn_event_status_text(event):
+    """Formato pulito: minuto una sola volta + fase partita."""
     status = event.get("status") or {}
     type_data = status.get("type") or {}
-    display_clock = status.get("displayClock") or ""
-    short_detail = event.get("shortDetail") or type_data.get("shortDetail") or type_data.get("description") or type_data.get("name") or "LIVE"
-    if display_clock:
-        return f"{display_clock} • {short_detail}"
-    return str(short_detail)
 
+    display_clock = str(status.get("displayClock") or "").strip()
+    short_detail = str(
+        event.get("shortDetail")
+        or type_data.get("shortDetail")
+        or type_data.get("description")
+        or type_data.get("name")
+        or "LIVE"
+    ).strip()
+
+    state_text = " ".join([
+        str(type_data.get("name") or ""),
+        str(type_data.get("description") or ""),
+        str(type_data.get("detail") or ""),
+        str(short_detail or ""),
+    ]).lower()
+
+    period = status.get("period") or event.get("period")
+    phase = ""
+
+    if any(k in state_text for k in ["halftime", "half time", "intervallo"]):
+        return "Intervallo"
+    if any(k in state_text for k in ["full time", "final", "finished", "fine partita"]):
+        return "Fine partita"
+    if any(k in state_text for k in ["penalty", "shootout", "rigori"]):
+        phase = "Rigori"
+    elif any(k in state_text for k in ["extra time", "supplementari"]):
+        phase = "Tempi supplementari"
+    else:
+        try:
+            pnum = int(period)
+        except Exception:
+            pnum = None
+        if pnum == 1:
+            phase = "1° Tempo"
+        elif pnum == 2:
+            phase = "2° Tempo"
+        elif pnum in (3, 4):
+            phase = "Tempi supplementari"
+
+    # Evita casi tipo "45'+4' • 45'+4'".
+    if display_clock and short_detail and display_clock.strip().lower() == short_detail.strip().lower():
+        short_detail = ""
+
+    if display_clock and phase:
+        return f"{display_clock} • {phase}"
+    if display_clock:
+        return display_clock
+    if phase:
+        return phase
+    return short_detail or "LIVE"
 
 def fetch_espn_live_matches():
     matches = []
@@ -2999,26 +3166,38 @@ async def live(ctx):
             red = details.get("red") or {}
             subs = details.get("subs") or {}
             scorers = details.get("scorers") or []
+            yellows = details.get("yellows") or []
+            reds = details.get("reds") or []
+            substitutions = details.get("substitutions") or []
+            penalties = details.get("penalties") or []
 
             lines = [
                 f"🏆 {m['league']}",
-                f"📊 Risultato: **{m['home_score']}-{m['away_score']}**",
-                f"⏱️ Stato: **{m['status']}**",
+                f"🕒 {m['status']}",
             ]
             if m.get("venue"):
+                # Manteniamo lo stadio completo, come richiesto.
                 lines.append(f"🏟️ Stadio: {m['venue']}")
-            if (yellow.get("home") or yellow.get("away")):
-                lines.append(f"🟨 Cartellini: {yellow.get('home', 0)}-{yellow.get('away', 0)}")
-            if (red.get("home") or red.get("away")):
-                lines.append(f"🟥 Espulsioni: {red.get('home', 0)}-{red.get('away', 0)}")
-            if (subs.get("home") or subs.get("away")):
-                lines.append(f"🔄 Cambi: {subs.get('home', 0)}-{subs.get('away', 0)}")
             if scorers:
-                lines.append("⚽ Marcatori: " + "; ".join(scorers[:4]))
+                lines.append("⚽ Marcatori\n" + "\n".join(scorers[:5]))
+            if yellows:
+                lines.append("🟨 Ammoniti\n" + "\n".join(yellows[:5]))
+            elif (yellow.get("home") or yellow.get("away")):
+                lines.append(f"🟨 Cartellini: {yellow.get('home', 0)}-{yellow.get('away', 0)}")
+            if reds:
+                lines.append("🟥 Espulsi\n" + "\n".join(reds[:5]))
+            elif (red.get("home") or red.get("away")):
+                lines.append(f"🟥 Espulsioni: {red.get('home', 0)}-{red.get('away', 0)}")
+            if substitutions:
+                lines.append("🔄 Sostituzioni\n" + "\n".join(substitutions[:5]))
+            elif (subs.get("home") or subs.get("away")):
+                lines.append(f"🔄 Cambi: {subs.get('home', 0)}-{subs.get('away', 0)}")
+            if penalties:
+                lines.append("🎯 Rigori\n" + "\n".join(penalties[:6]))
 
             embed.add_field(
-                name=f"⚽ {m['home']} vs {m['away']}",
-                value="\n".join(lines)[:1024],
+                name=f"⚽ {m['home']} {m['home_score']}-{m['away_score']} {m['away']}",
+                value="\n\n".join(lines)[:1024],
                 inline=False
             )
 
