@@ -77,6 +77,18 @@ LAST_CALENDAR_POST_DATE = None
 # Canale dedicato ai risultati dei mercati risolti automaticamente.
 RESULTS_CHANNEL_ID = 1522189230128762971
 
+# Canale dedicato alle notizie automatiche v2.0.0.
+MARKET_PULSE_CHANNEL_ID = 1522564253725364295
+
+# API News v2.0.0
+# GNEWS_API_KEY: news sportive generali via GNews.
+# API_FOOTBALL_KEY: opzionale, per fonti API-Football/API-Sports se disponibili.
+GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY")
+API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
+API_FOOTBALL_HOST = os.environ.get("API_FOOTBALL_HOST", "v3.football.api-sports.io")
+API_FOOTBALL_NEWS_URL = os.environ.get("API_FOOTBALL_NEWS_URL")
+NEWS_LOOP_MINUTES = 30
+
 # Canale dedicato al registro delle attività admin.
 ACTIVITY_LOG_CHANNEL_ID = 1522190483713953813
 
@@ -404,6 +416,30 @@ CREATE TABLE IF NOT EXISTS user_badges (
     awarded_at TEXT,
     removed_at TEXT,
     PRIMARY KEY (user_id, badge_id)
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS personal_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    market_id INTEGER,
+    alert_type TEXT,
+    side TEXT,
+    target_value REAL,
+    active INTEGER DEFAULT 1,
+    triggered INTEGER DEFAULT 0,
+    created_at TEXT,
+    triggered_at TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS news_seen (
+    source TEXT,
+    external_id TEXT,
+    created_at TEXT,
+    PRIMARY KEY (source, external_id)
 )
 """)
 
@@ -2693,6 +2729,7 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
 
     await ctx.send(embed=embed)
+    await check_personal_alerts_for_market(market_id, fallback_channel=ctx.channel)
     await evaluate_user_badges(user_id, notify=True)
 
 # =========================
@@ -3202,6 +3239,8 @@ async def resolve_market_command(ctx, market_id: int, result: str):
         await ctx.send("⚠️ Canale risultati non trovato. Pubblico qui il riepilogo.", embed=result_embed)
         print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
 
+    await check_personal_alerts_for_market(market_id, fallback_channel=ctx.channel, only_resolved=True)
+
     await log_admin_activity(
         ctx,
         "✅ !resolve",
@@ -3275,6 +3314,192 @@ async def resetuser(ctx, member: discord.Member):
         details=f"Utente resettato a 1000 crediti: {member.mention} (`{member.id}`)",
         color=COLOR_WHITE
     )
+
+
+# =========================
+# PERSONAL ALERT COMMANDS
+# =========================
+@bot.group(name="alert", invoke_without_command=True)
+async def alert_group(ctx, alert_type: str = None, market_id: int = None, side_or_value: str = None, value: str = None):
+    user_id = str(ctx.author.id)
+
+    if not alert_type:
+        embed = discord.Embed(
+            title="🔔 Alert personali",
+            description="Crea notifiche personali sui mercati. Le notifiche arrivano in DM; se i DM sono chiusi, il bot prova con mention nel server.",
+            color=COLOR_GOLD
+        )
+        embed.add_field(
+            name="Comandi",
+            value=(
+                "`!alert price ID YES/NO percentuale`\n"
+                "`!alert profit ID percentuale`\n"
+                "`!alert loss ID percentuale`\n"
+                "`!alert closing ID`\n"
+                "`!alert resolved ID`\n"
+                "`!alerts`\n"
+                "`!alert remove ALERT_ID`\n"
+                "`!alert clear`"
+            ),
+            inline=False
+        )
+        await ctx.send(embed=embed)
+        return
+
+    alert_type = alert_type.lower().strip()
+
+    if alert_type not in ["price", "profit", "loss", "closing", "resolved"]:
+        await ctx.send("❌ Tipo alert non valido. Usa `price`, `profit`, `loss`, `closing` o `resolved`.")
+        return
+
+    if market_id is None:
+        await ctx.send("❌ Devi indicare l'ID del mercato.")
+        return
+
+    market = get_market_row(market_id)
+    if not market:
+        await ctx.send("❌ Mercato non trovato.")
+        return
+
+    _, question, *_ = market
+    side = None
+    target_value = None
+
+    if alert_type == "price":
+        if not side_or_value:
+            await ctx.send("❌ Esempio corretto: `!alert price 3 YES 65`")
+            return
+        side = side_or_value.upper()
+        if side not in ["YES", "NO"]:
+            await ctx.send("❌ Side non valido. Usa YES o NO.")
+            return
+        target_value = parse_percent(value)
+        if target_value is None:
+            await ctx.send("❌ Percentuale non valida. Esempio: `!alert price 3 YES 65`")
+            return
+
+    elif alert_type in ["profit", "loss"]:
+        target_value = parse_percent(side_or_value)
+        if target_value is None:
+            await ctx.send(f"❌ Percentuale non valida. Esempio: `!alert {alert_type} 3 20`")
+            return
+
+    elif alert_type in ["closing", "resolved"]:
+        target_value = 0
+
+    c.execute("""
+        INSERT INTO personal_alerts (user_id, market_id, alert_type, side, target_value, active, triggered, created_at)
+        VALUES (?, ?, ?, ?, ?, 1, 0, ?)
+    """, (user_id, market_id, alert_type, side, target_value, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+
+    alert_id = c.lastrowid
+
+    embed = discord.Embed(
+        title="✅ Alert creato",
+        description=question,
+        color=COLOR_GREEN
+    )
+    embed.add_field(name="🆔 Alert", value=f"#{alert_id}", inline=True)
+    embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
+    embed.add_field(name="Tipo", value=alert_type, inline=True)
+
+    if alert_type == "price":
+        embed.add_field(name="Soglia", value=f"{side} ≥ {target_value:.1f}%", inline=False)
+    elif alert_type == "profit":
+        embed.add_field(name="Soglia", value=f"Profitto ≥ {target_value:.1f}%", inline=False)
+    elif alert_type == "loss":
+        embed.add_field(name="Soglia", value=f"Perdita ≤ -{target_value:.1f}%", inline=False)
+    elif alert_type == "closing":
+        embed.add_field(name="Soglia", value="10 minuti prima dell'inizio della partita collegata.", inline=False)
+    else:
+        embed.add_field(name="Soglia", value="Quando il mercato viene risolto.", inline=False)
+
+    await ctx.send(embed=embed)
+
+
+@alert_group.command(name="remove", aliases=["delete", "rimuovi"])
+async def alert_remove(ctx, alert_id: int):
+    user_id = str(ctx.author.id)
+    c.execute("""
+        UPDATE personal_alerts
+        SET active=0,
+            triggered=1,
+            triggered_at=?
+        WHERE id=?
+          AND user_id=?
+          AND active=1
+    """, (datetime.now(timezone.utc).isoformat(), alert_id, user_id))
+    conn.commit()
+
+    if c.rowcount <= 0:
+        await ctx.send("❌ Alert non trovato o già disattivato.")
+        return
+
+    await ctx.send(f"🗑️ Alert #{alert_id} rimosso.")
+
+
+@alert_group.command(name="clear", aliases=["pulisci"])
+async def alert_clear(ctx):
+    user_id = str(ctx.author.id)
+    c.execute("""
+        UPDATE personal_alerts
+        SET active=0,
+            triggered=1,
+            triggered_at=?
+        WHERE user_id=?
+          AND active=1
+    """, (datetime.now(timezone.utc).isoformat(), user_id))
+    removed = c.rowcount
+    conn.commit()
+
+    await ctx.send(f"🧹 Alert attivi rimossi: **{removed}**.")
+
+
+@bot.command(name="alerts", aliases=["mieialert"])
+async def alerts_list(ctx):
+    user_id = str(ctx.author.id)
+    c.execute("""
+        SELECT a.id, a.market_id, a.alert_type, a.side, a.target_value, m.question
+        FROM personal_alerts a
+        JOIN markets m ON a.market_id=m.id
+        WHERE a.user_id=?
+          AND a.active=1
+          AND a.triggered=0
+        ORDER BY a.id DESC
+        LIMIT 15
+    """, (user_id,))
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Non hai alert personali attivi.")
+        return
+
+    embed = discord.Embed(
+        title="🔔 I tuoi alert attivi",
+        color=COLOR_GOLD
+    )
+
+    for alert_id, market_id, alert_type, side, target_value, question in rows:
+        if alert_type == "price":
+            rule = f"{side} ≥ {target_value:.1f}%"
+        elif alert_type == "profit":
+            rule = f"Profitto ≥ {target_value:.1f}%"
+        elif alert_type == "loss":
+            rule = f"Perdita ≤ -{target_value:.1f}%"
+        elif alert_type == "closing":
+            rule = "10 minuti prima dell'inizio"
+        else:
+            rule = "mercato risolto"
+
+        embed.add_field(
+            name=f"#{alert_id} • Mercato #{market_id} • {alert_type}",
+            value=f"{question[:120]}\n**Regola:** {rule}",
+            inline=False
+        )
+
+    embed.set_footer(text="Rimuovi con !alert remove ALERT_ID")
+    await ctx.send(embed=embed)
 
 
 # =========================
@@ -3369,6 +3594,19 @@ async def help_command(ctx, section: str = None):
         inline=False
     )
     embed.add_field(
+        name="🔔 Alert personali",
+        value=(
+            "`!alert price ID YES/NO percentuale`\n"
+            "`!alert profit ID percentuale`\n"
+            "`!alert loss ID percentuale`\n"
+            "`!alert closing ID`\n"
+            "`!alert resolved ID`\n"
+            "`!alerts`\n"
+            "`!alert remove ALERT_ID` / `!alert clear`"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="👥 Social trading",
         value=(
             "`!follow @utente`\n"
@@ -3443,6 +3681,381 @@ def payout_market(market_id, result):
 
     return total_paid
 
+
+# =========================
+# V2.0.0 NEWS + PERSONAL ALERT HELPERS
+# =========================
+def request_json(url, headers=None, params=None, timeout=10):
+    try:
+        r = requests.get(url, headers=headers or {}, params=params or {}, timeout=timeout)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        return r.status_code, data
+    except Exception as e:
+        return None, {"error": str(e)}
+
+
+def is_news_already_seen(source, external_id):
+    c.execute("SELECT 1 FROM news_seen WHERE source=? AND external_id=?", (source, str(external_id)))
+    return c.fetchone() is not None
+
+
+def mark_news_seen(source, external_id):
+    try:
+        c.execute("""
+            INSERT OR IGNORE INTO news_seen (source, external_id, created_at)
+            VALUES (?, ?, ?)
+        """, (source, str(external_id), datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+    except Exception as e:
+        print(f"[NEWS SEEN] Errore salvataggio: {e}")
+
+
+def fetch_gnews_sports():
+    if not GNEWS_API_KEY:
+        return []
+
+    status, data = request_json(
+        "https://gnews.io/api/v4/search",
+        params={
+            "q": "calcio OR football OR sport",
+            "lang": "it",
+            "country": "it",
+            "max": 5,
+            "apikey": GNEWS_API_KEY
+        }
+    )
+
+    if status != 200:
+        print(f"[GNEWS] Status {status}: {data}")
+        return []
+
+    articles = []
+    for a in data.get("articles", []) or []:
+        external_id = a.get("url") or a.get("title")
+        if not external_id:
+            continue
+        articles.append({
+            "source": "GNews",
+            "external_id": external_id,
+            "title": a.get("title", "Notizia sportiva"),
+            "description": a.get("description") or "",
+            "url": a.get("url") or "",
+            "published_at": a.get("publishedAt") or ""
+        })
+
+    return articles
+
+
+def fetch_api_football_news():
+    """Fonte opzionale separata per API-Football/API-Sports.
+
+    API-Football non sempre espone endpoint news nei piani standard: per questo
+    la URL può essere configurata via API_FOOTBALL_NEWS_URL. Se non è presente,
+    il bot non si blocca e GNews continua a funzionare.
+    """
+    if not API_FOOTBALL_KEY or not API_FOOTBALL_NEWS_URL:
+        return []
+
+    headers = {
+        "x-apisports-key": API_FOOTBALL_KEY,
+        "x-rapidapi-key": API_FOOTBALL_KEY,
+        "x-rapidapi-host": API_FOOTBALL_HOST
+    }
+
+    status, data = request_json(API_FOOTBALL_NEWS_URL, headers=headers)
+
+    if status != 200:
+        print(f"[API-FOOTBALL NEWS] Status {status}: {data}")
+        return []
+
+    raw_items = data.get("response") or data.get("articles") or data.get("news") or []
+    articles = []
+
+    for item in raw_items[:5]:
+        title = item.get("title") or item.get("headline") or "Aggiornamento calcio"
+        url = item.get("url") or item.get("link") or ""
+        external_id = item.get("id") or url or title
+        articles.append({
+            "source": "API-Football",
+            "external_id": external_id,
+            "title": title,
+            "description": item.get("description") or item.get("summary") or "",
+            "url": url,
+            "published_at": item.get("published_at") or item.get("date") or ""
+        })
+
+    return articles
+
+
+async def post_news_article(channel, article):
+    embed = discord.Embed(
+        title=f"📰 {article['title'][:250]}",
+        description=(article.get("description") or "Nuovo aggiornamento disponibile.")[:1000],
+        color=COLOR_CYAN,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="Fonte", value=article.get("source", "News"), inline=True)
+    if article.get("published_at"):
+        embed.add_field(name="Pubblicata", value=str(article["published_at"])[:80], inline=True)
+    if article.get("url"):
+        embed.add_field(name="Link", value=article["url"][:1024], inline=False)
+    embed.set_footer(text="Market Pulse • v2.0.0")
+
+    await channel.send(embed=embed)
+
+
+async def market_pulse_news_loop():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            channel = bot.get_channel(MARKET_PULSE_CHANNEL_ID)
+            if not channel:
+                print(f"[MARKET PULSE] Canale {MARKET_PULSE_CHANNEL_ID} non trovato.")
+            else:
+                articles = fetch_api_football_news() + fetch_gnews_sports()
+
+                for article in articles:
+                    source = article.get("source", "news")
+                    external_id = article.get("external_id")
+                    if not external_id or is_news_already_seen(source, external_id):
+                        continue
+
+                    await post_news_article(channel, article)
+                    mark_news_seen(source, external_id)
+                    await asyncio.sleep(2)
+
+        except Exception as e:
+            print("[MARKET PULSE] Errore loop news:", e)
+
+        await asyncio.sleep(NEWS_LOOP_MINUTES * 60)
+
+
+async def notify_personal_alert(user_id, embed, fallback_channel=None):
+    try:
+        user = bot.get_user(int(user_id)) or await bot.fetch_user(int(user_id))
+    except Exception:
+        user = None
+
+    if user:
+        try:
+            await user.send(embed=embed)
+            return True
+        except Exception:
+            pass
+
+    if fallback_channel:
+        try:
+            await fallback_channel.send(content=f"<@{user_id}>", embed=embed)
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
+def get_market_row(market_id):
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool, total_pool, active, resolved, result, match_key, channel_id
+        FROM markets
+        WHERE id=?
+    """, (market_id,))
+    return c.fetchone()
+
+
+def calculate_user_market_pnl(user_id, market_id):
+    c.execute("""
+        SELECT side, amount, price
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+    """, (str(user_id), market_id))
+    rows = c.fetchall()
+
+    if not rows:
+        return None
+
+    market = get_market_row(market_id)
+    if not market:
+        return None
+
+    _, _, yes, no, *_ = market
+    yes_p, no_p = market_probabilities(yes, no)
+
+    invested = 0.0
+    current_value = 0.0
+
+    for side, amount, entry_price in rows:
+        current_price = yes_p if side == "YES" else no_p
+        entry_price = safe_entry_price(entry_price, current_price)
+        invested += float(amount)
+        current_value += float(amount) * (current_price / entry_price)
+
+    if invested <= 0:
+        return None
+
+    pnl_percent = ((current_value - invested) / invested) * 100
+    return invested, current_value, pnl_percent
+
+
+def build_personal_alert_embed(alert_id, alert_type, market_id, question, details):
+    embed = discord.Embed(
+        title="🔔 Alert personale",
+        description=question,
+        color=COLOR_GOLD,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="🆔 Alert", value=f"#{alert_id}", inline=True)
+    embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
+    embed.add_field(name="Tipo", value=alert_type, inline=True)
+    embed.add_field(name="Dettagli", value=details[:1000], inline=False)
+    embed.set_footer(text="Alert personale v2.0.0")
+    return embed
+
+
+async def check_personal_alerts_for_market(market_id, fallback_channel=None, only_resolved=False):
+    market = get_market_row(market_id)
+    if not market:
+        return
+
+    mid, question, yes, no, total, active, resolved, result, match_key, channel_id = market
+    yes_p, no_p = market_probabilities(yes, no)
+
+    c.execute("""
+        SELECT id, user_id, alert_type, side, target_value
+        FROM personal_alerts
+        WHERE market_id=?
+          AND active=1
+          AND triggered=0
+    """, (market_id,))
+    alerts = c.fetchall()
+
+    for alert_id, user_id, alert_type, side, target_value in alerts:
+        should_trigger = False
+        details = ""
+
+        if alert_type == "price" and not only_resolved:
+            current = yes_p if side == "YES" else no_p
+            if current >= float(target_value):
+                should_trigger = True
+                details = f"La quota **{side}** ha raggiunto **{current:.1f}%** contro soglia **{target_value:.1f}%**."
+
+        elif alert_type in ["profit", "loss"] and not only_resolved:
+            pnl = calculate_user_market_pnl(user_id, market_id)
+            if pnl:
+                invested, current_value, pnl_percent = pnl
+                if alert_type == "profit" and pnl_percent >= float(target_value):
+                    should_trigger = True
+                    details = f"Profit target raggiunto: **{pnl_percent:+.1f}%**. Valore stimato: **{current_value:.0f}** su **{invested:.0f}** investiti."
+                elif alert_type == "loss" and pnl_percent <= -abs(float(target_value)):
+                    should_trigger = True
+                    details = f"Soglia perdita raggiunta: **{pnl_percent:+.1f}%**. Valore stimato: **{current_value:.0f}** su **{invested:.0f}** investiti."
+
+        elif alert_type == "resolved" and resolved == 1:
+            should_trigger = True
+            details = f"Il mercato è stato risolto con esito **{result or 'N/D'}**."
+
+        if should_trigger:
+            embed = build_personal_alert_embed(alert_id, alert_type, market_id, question, details)
+            sent = await notify_personal_alert(user_id, embed, fallback_channel=fallback_channel)
+            if sent:
+                c.execute("""
+                    UPDATE personal_alerts
+                    SET triggered=1,
+                        active=0,
+                        triggered_at=?
+                    WHERE id=?
+                """, (datetime.now(timezone.utc).isoformat(), alert_id))
+                conn.commit()
+
+
+async def personal_alert_checker_loop():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            c.execute("SELECT id, channel_id FROM markets WHERE active=1 OR resolved=1")
+            rows = c.fetchall()
+            for market_id, channel_id in rows:
+                fallback = None
+                try:
+                    fallback = bot.get_channel(int(channel_id)) if channel_id else None
+                except Exception:
+                    fallback = None
+                await check_personal_alerts_for_market(market_id, fallback_channel=fallback)
+
+            await check_closing_alerts()
+
+        except Exception as e:
+            print("[PERSONAL ALERTS] Errore:", e)
+
+        await asyncio.sleep(60)
+
+
+async def check_closing_alerts():
+    now = datetime.now(timezone.utc)
+
+    c.execute("""
+        SELECT a.id, a.user_id, a.market_id, m.question, m.match_key, m.channel_id
+        FROM personal_alerts a
+        JOIN markets m ON a.market_id=m.id
+        WHERE a.alert_type='closing'
+          AND a.active=1
+          AND a.triggered=0
+          AND m.active=1
+          AND m.resolved=0
+          AND m.match_key LIKE 'MATCH_%'
+    """)
+    rows = c.fetchall()
+
+    for alert_id, user_id, market_id, question, match_key, channel_id in rows:
+        try:
+            match_id = int(str(match_key).replace("MATCH_", ""))
+        except Exception:
+            continue
+
+        match, _, _ = get_match_details(match_id)
+        if not match:
+            continue
+
+        utc_date = match.get("utcDate")
+        if not utc_date:
+            continue
+
+        try:
+            start_dt = datetime.fromisoformat(utc_date.replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        if start_dt - timedelta(minutes=10) <= now <= start_dt + timedelta(minutes=5):
+            embed = build_personal_alert_embed(
+                alert_id,
+                "closing",
+                market_id,
+                question,
+                "La partita collegata al mercato inizierà tra circa **10 minuti**. Ultima occasione per controllare la posizione."
+            )
+            fallback = None
+            try:
+                fallback = bot.get_channel(int(channel_id)) if channel_id else None
+            except Exception:
+                fallback = None
+
+            sent = await notify_personal_alert(user_id, embed, fallback_channel=fallback)
+            if sent:
+                c.execute("""
+                    UPDATE personal_alerts
+                    SET triggered=1,
+                        active=0,
+                        triggered_at=?
+                    WHERE id=?
+                """, (datetime.now(timezone.utc).isoformat(), alert_id))
+                conn.commit()
 
 # =========================
 # MARKET ALERTS
@@ -3575,6 +4188,8 @@ async def resolver_loop():
                 else:
                     print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
 
+                await check_personal_alerts_for_market(mid, fallback_channel=result_channel, only_resolved=True)
+
         except Exception as e:
             print("ERR:", e)
 
@@ -3651,6 +4266,8 @@ async def on_ready():
     bot.loop.create_task(referral_checker())
     bot.loop.create_task(badge_checker_loop())
     bot.loop.create_task(calendar_poster_loop())
+    bot.loop.create_task(market_pulse_news_loop())
+    bot.loop.create_task(personal_alert_checker_loop())
 
 
 # =========================
