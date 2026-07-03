@@ -1589,160 +1589,158 @@ def _draw_stat_card(draw, box, label, value, theme, value_color=None):
 
 
 async def make_profile_card_png(member, metrics, trader_level, xp_current, xp_required, badge_ids=None):
-    """Genera la Profile Card PNG Standard ridisegnata da zero.
+    """
+    Profile Card PNG Standard redesign.
 
-    Obiettivo grafico:
-    - card Standard pulita, premium e leggibile;
-    - nessuna emoji nel PNG;
-    - sfondo a tinta unita;
-    - avatar e nome come punto focale;
-    - riquadri uniformi, con numero grande sopra e label sotto;
-    - solo Saldo, Patrimonio e Accuracy hanno numeri colorati;
-    - niente badge/vetrina e niente footer nel PNG.
+    Principi:
+    - niente emoji nella PNG;
+    - sfondo tinta unita;
+    - avatar e nome grandi;
+    - trader level e rank sotto il nome;
+    - riquadri uniformi;
+    - numeri sopra, etichette sotto;
+    - colori solo sui numeri principali;
+    - badge/collezionabili NON nella PNG.
     """
     if Image is None or ImageDraw is None or ImageFont is None:
         raise RuntimeError("Pillow non installato: impossibile generare la card PNG.")
 
-    import re
-
     user_id = str(member.id)
     theme, theme_id = _profile_card_theme_for_user(user_id)
 
-    def clean_text(value):
-        """Rimuove emoji/simboli non testuali dalla card PNG."""
-        text = str(value or "")
-        text = re.sub(r"[^\w\s#./:%+\-]", "", text, flags=re.UNICODE)
-        return " ".join(text.split()).strip()
+    W, H = 1200, 675
 
-    def font(size, bold=False):
-        """Font più pulito/compatibile: Liberation se disponibile, poi DejaVu."""
-        if ImageFont is None:
-            return None
-        paths = []
-        if bold:
-            paths += [
-                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            ]
-        else:
-            paths += [
-                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            ]
-        for fp in paths:
-            try:
-                return ImageFont.truetype(fp, size)
-            except Exception:
-                pass
-        return ImageFont.load_default()
+    # Palette Standard pulita
+    bg = (10, 14, 22)
+    panel = (18, 25, 38)
+    panel_soft = (24, 32, 48)
+    border = (42, 54, 76)
+    text = (245, 247, 250)
+    muted = (155, 164, 178)
 
-    def text_size(txt, fnt):
-        box = draw.textbbox((0, 0), str(txt), font=fnt)
-        return box[2] - box[0], box[3] - box[1]
-
-    def draw_fit_text(x, y, txt, fnt, fill, max_width):
-        txt = clean_text(txt)
-        if not txt:
-            return
-        while len(txt) > 1 and text_size(txt, fnt)[0] > max_width:
-            txt = txt[:-2].rstrip() + "..."
-        draw.text((x, y), txt, font=fnt, fill=fill)
-
-    def draw_centered_text(cx, y, txt, fnt, fill, max_width=None):
-        txt = clean_text(txt)
-        if max_width:
-            while len(txt) > 1 and text_size(txt, fnt)[0] > max_width:
-                txt = txt[:-2].rstrip() + "..."
-        w, _ = text_size(txt, fnt)
-        draw.text((cx - w / 2, y), txt, font=fnt, fill=fill)
-
-    def rounded(box, radius, fill, outline=None, width=1):
-        _draw_rounded(draw, box, radius, fill, outline=outline, width=width)
-
-    def draw_stat(box, label, value, value_color=None):
-        """Riquadro uniforme: numero dominante sopra, label sotto."""
-        x1, y1, x2, y2 = box
-        rounded(box, 30, panel_color, outline=panel_border, width=2)
-
-        value = clean_text(value)
-        label = clean_text(label).upper()
-        value_font = font(62, True)
-        label_font = font(24, False)
-
-        # Se il numero è troppo lungo, scala leggermente il font.
-        available = (x2 - x1) - 46
-        for size in (62, 58, 54, 50, 46, 42):
-            value_font = font(size, True)
-            if text_size(value, value_font)[0] <= available:
-                break
-
-        draw_centered_text((x1 + x2) / 2, y1 + 26, value, value_font, value_color or text_main, max_width=available)
-        draw_centered_text((x1 + x2) / 2, y1 + 95, label, label_font, text_muted, max_width=available)
-
-    # Palette Standard: pannelli tutti uguali; solo alcuni numeri sono colorati.
-    bg_color = theme.get("bg", (14, 17, 23))
-    panel_color = theme.get("panel", (17, 24, 39))
-    panel_border = theme.get("panel_2", (31, 41, 55))
-    text_main = theme.get("text", (248, 250, 252))
-    text_muted = theme.get("muted", (156, 163, 175))
     green = (34, 197, 94)
     blue = (56, 189, 248)
     red = (239, 68, 68)
 
-    # Base card: tinta unita, nessuna texture, nessuna stripe.
-    img = Image.new("RGB", (PROFILE_CARD_WIDTH, PROFILE_CARD_HEIGHT), bg_color)
+    img = Image.new("RGB", (W, H), bg)
     draw = ImageDraw.Draw(img)
 
-    # Misure principali.
-    margin = 48
-    card_w = PROFILE_CARD_WIDTH
-    header_h = 210
+    # Font
+    font_name = _load_card_font(76, True)
+    font_meta = _load_card_font(30, False)
+    font_number_big = _load_card_font(58, True)
+    font_number_med = _load_card_font(50, True)
+    font_label = _load_card_font(24, False)
+    font_xp = _load_card_font(26, True)
+    font_xp_small = _load_card_font(24, False)
 
-    # Header pulito.
-    header_box = (margin, 42, card_w - margin, header_h + 42)
-    rounded(header_box, 40, panel_color, outline=panel_border, width=2)
+    # Helpers locali
+    def rounded(box, radius=28, fill=panel, outline=border, width=2):
+        _draw_rounded(draw, box, radius, fill, outline=outline, width=width)
 
-    # Avatar grande.
-    avatar_size = 150
-    avatar_x = margin + 34
-    avatar_y = 72
+    def text_fit(xy, value, font, fill, max_width=None):
+        _draw_text(draw, xy, str(value), font, fill, max_width=max_width)
+
+    def draw_stat(box, value, label, value_color=text):
+        rounded(box, 30, panel, border, 2)
+        x1, y1, x2, y2 = box
+
+        value = str(value)
+        label = str(label).upper()
+
+        # Numero grande sopra
+        text_fit(
+            (x1 + 28, y1 + 25),
+            value,
+            font_number_big if len(value) <= 7 else font_number_med,
+            value_color,
+            max_width=(x2 - x1 - 56)
+        )
+
+        # Etichetta sotto
+        text_fit(
+            (x1 + 30, y2 - 44),
+            label,
+            font_label,
+            muted,
+            max_width=(x2 - x1 - 60)
+        )
+
+    # =========================
+    # HEADER
+    # =========================
+    header = (48, 42, 1152, 220)
+    rounded(header, 38, panel, border, 2)
+
+    # Avatar grande
+    avatar_size = 142
+    avatar_x = 78
+    avatar_y = 60
+
     try:
         avatar_bytes = await member.display_avatar.with_size(256).read()
         avatar = _make_circle_avatar(avatar_bytes, avatar_size)
         img.paste(avatar, (avatar_x, avatar_y), avatar)
+
         draw.ellipse(
-            (avatar_x - 5, avatar_y - 5, avatar_x + avatar_size + 5, avatar_y + avatar_size + 5),
+            (
+                avatar_x - 5,
+                avatar_y - 5,
+                avatar_x + avatar_size + 5,
+                avatar_y + avatar_size + 5,
+            ),
             outline=blue,
             width=5,
         )
     except Exception:
         draw.ellipse(
-            (avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size),
-            fill=panel_border,
+            (
+                avatar_x,
+                avatar_y,
+                avatar_x + avatar_size,
+                avatar_y + avatar_size,
+            ),
+            fill=panel_soft,
             outline=blue,
             width=5,
         )
-        draw_centered_text(avatar_x + avatar_size / 2, avatar_y + 38, "?", font(70, True), text_main)
 
-    # Nome dominante + livello/rank sotto.
-    display_name = clean_text(getattr(member, "display_name", "Trader")) or "Trader"
-    trader_clean = clean_text(trader_level).replace("Lv", "Trader").strip()
-    if not trader_clean.lower().startswith("trader"):
-        trader_clean = f"Trader {trader_clean}"
-    rank_text = f"Rank #{metrics.get('rank')}" if metrics.get("rank") else "Rank N/D"
+    # Nome grande
+    display_name = getattr(member, "display_name", "Trader")
+    rank = metrics.get("rank")
+    rank_text = f"Rank #{rank}" if rank else "Rank N/D"
 
-    name_x = avatar_x + avatar_size + 42
-    name_y = 86
-    draw_fit_text(name_x, name_y, display_name, font(72, True), text_main, 660)
-    draw_fit_text(name_x + 3, name_y + 86, f"{trader_clean}  /  {rank_text}", font(30, False), text_muted, 660)
+    name_x = 250
+    text_fit(
+        (name_x, 70),
+        display_name,
+        font_name,
+        text,
+        max_width=720
+    )
 
-    # Piccolo tag Standard in alto a destra, senza footer o scritte inutili.
-    tag_text = "STANDARD"
-    tag_box = (card_w - margin - 205, 89, card_w - margin - 38, 139)
-    rounded(tag_box, 24, bg_color, outline=panel_border, width=1)
-    draw_centered_text((tag_box[0] + tag_box[2]) / 2, tag_box[1] + 11, tag_text, font(25, True), text_muted, max_width=145)
+    # Trader level + rank sotto
+    text_fit(
+        (name_x + 4, 150),
+        f"{trader_level}   |   {rank_text}",
+        font_meta,
+        muted,
+        max_width=700
+    )
 
-    # Dati principali.
+    # Piccola label standard, pulita
+    rounded((970, 88, 1118, 136), 22, bg, border, 1)
+    text_fit(
+        (998, 101),
+        "STANDARD",
+        _load_card_font(23, True),
+        blue,
+        max_width=100
+    )
+
+    # =========================
+    # DATI
+    # =========================
     balance = float(metrics.get("balance", 0) or 0)
     net_worth = float(metrics.get("net_worth", 0) or 0)
     accuracy = float(metrics.get("accuracy", 0) or 0)
@@ -1754,63 +1752,111 @@ async def make_profile_card_png(member, metrics, trader_level, xp_current, xp_re
         try:
             return f"{float(v):,.0f}".replace(",", ".")
         except Exception:
-            return "0"
+            return str(v)
 
-    # Griglia stat: pannelli identici, numeri molto grandi.
-    top = 292
-    stat_w = 338
-    stat_h = 140
-    gap_x = 32
-    gap_y = 30
-    boxes = []
-    for row in range(2):
-        for col in range(3):
-            x = margin + col * (stat_w + gap_x)
-            y = top + row * (stat_h + gap_y)
-            boxes.append((x, y, x + stat_w, y + stat_h))
+    # =========================
+    # RIQUADRI STATISTICHE
+    # =========================
+    card_w = 338
+    card_h = 132
+    gap_x = 31
+    gap_y = 28
 
-    draw_stat(boxes[0], "Saldo", fmt_int(balance), green)
-    draw_stat(boxes[1], "Patrimonio", fmt_int(net_worth), blue)
-    draw_stat(boxes[2], "Accuracy", f"{accuracy:.1f}%", green if accuracy >= 50 else red)
-    draw_stat(boxes[3], "Trade", str(total_trades), text_main)
-    draw_stat(boxes[4], "Posizioni", str(open_positions), text_main)
-    draw_stat(boxes[5], "Streak", str(current_streak), text_main)
+    start_x = 48
+    start_y = 255
 
-    # Barra XP ampia, leggibile, senza vetrina badge/collezionabili nella PNG.
-    xp_y = 610
-    xp_box = (margin, xp_y, card_w - margin, xp_y + 48)
-    rounded(xp_box, 24, panel_color, outline=panel_border, width=2)
+    boxes = [
+        (start_x, start_y, start_x + card_w, start_y + card_h),
+        (start_x + card_w + gap_x, start_y, start_x + 2 * card_w + gap_x, start_y + card_h),
+        (start_x + 2 * (card_w + gap_x), start_y, start_x + 3 * card_w + 2 * gap_x, start_y + card_h),
 
-    xp_total = int(metrics.get("xp", 0) or 0)
-    xp_required_text = str(xp_required)
-    left_label = clean_text(trader_clean)
-    right_label = f"{xp_total} XP"
+        (start_x, start_y + card_h + gap_y, start_x + card_w, start_y + 2 * card_h + gap_y),
+        (start_x + card_w + gap_x, start_y + card_h + gap_y, start_x + 2 * card_w + gap_x, start_y + 2 * card_h + gap_y),
+        (start_x + 2 * (card_w + gap_x), start_y + card_h + gap_y, start_x + 3 * card_w + 2 * gap_x, start_y + 2 * card_h + gap_y),
+    ]
 
-    draw_fit_text(margin + 28, xp_y + 12, left_label, font(25, True), text_main, 260)
-    right_w, _ = text_size(right_label, font(25, True))
-    draw.text((card_w - margin - 28 - right_w, xp_y + 12), right_label, font=font(25, True), fill=text_main)
+    draw_stat(boxes[0], fmt_int(balance), "Saldo", green)
+    draw_stat(boxes[1], fmt_int(net_worth), "Patrimonio", blue)
 
-    bar_x = margin + 310
-    bar_y = xp_y + 18
-    bar_w = card_w - (2 * margin) - 620
-    bar_h = 13
-    rounded((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), 8, panel_border)
+    accuracy_color = green if accuracy >= 50 else red
+    draw_stat(boxes[2], f"{accuracy:.1f}%", "Accuracy", accuracy_color)
 
-    if xp_required_text == "MAX":
+    draw_stat(boxes[3], total_trades, "Trade", text)
+    draw_stat(boxes[4], open_positions, "Posizioni", text)
+    draw_stat(boxes[5], current_streak, "Streak", text)
+
+    # =========================
+    # XP BAR
+    # =========================
+    xp_box = (48, 590, 1152, 642)
+    rounded(xp_box, 24, panel, border, 2)
+
+    # Testo XP sinistra/destra
+    text_fit(
+        (76, 604),
+        "XP Trader",
+        font_xp,
+        text,
+        max_width=220
+    )
+
+    if str(xp_required) == "MAX":
+        xp_text = f"{xp_current} XP"
         pct = 1.0
     else:
+        xp_text = f"{xp_current}/{xp_required} XP"
         try:
-            pct = max(0.0, min(1.0, float(xp_current) / float(xp_required)))
+            pct = float(xp_current) / float(xp_required)
         except Exception:
             pct = 0.0
 
-    if pct > 0:
-        rounded((bar_x, bar_y, bar_x + max(10, int(bar_w * pct)), bar_y + bar_h), 8, green)
+    pct = max(0.0, min(1.0, pct))
 
-    # Nessun footer, nessuna vetrina, nessuna sezione badge nel PNG.
+    # XP totale a destra
+    xp_text_font = font_xp_small
+    bbox = draw.textbbox((0, 0), xp_text, font=xp_text_font)
+    xp_text_w = bbox[2] - bbox[0]
+
+    text_fit(
+        (1124 - xp_text_w, 605),
+        xp_text,
+        xp_text_font,
+        muted,
+        max_width=260
+    )
+
+    # Barra centrale
+    bar_x = 285
+    bar_y = 611
+    bar_w = 610
+    bar_h = 15
+
+    _draw_rounded(
+        draw,
+        (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
+        9,
+        panel_soft,
+        outline=None,
+        width=0
+    )
+
+    if pct > 0:
+        fill_w = max(10, int(bar_w * pct))
+        _draw_rounded(
+            draw,
+            (bar_x, bar_y, bar_x + fill_w, bar_y + bar_h),
+            9,
+            blue,
+            outline=None,
+            width=0
+        )
+
+    # Nessun footer, nessuna vetrina, nessun badge nella PNG
+
     buffer = io.BytesIO()
     img.save(buffer, format="PNG", optimize=True)
     buffer.seek(0)
+
     return buffer, theme_id
 
 
