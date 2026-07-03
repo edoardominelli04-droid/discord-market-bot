@@ -3,4 +3,3 @@ requests
 matplotlib
 numpy
 scipy
-Pillow
