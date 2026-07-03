@@ -6,6 +6,11 @@ import asyncio
 import matplotlib.pyplot as plt
 import io
 
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+except Exception:
+    Image = ImageDraw = ImageFont = ImageFilter = None
+
 plt.style.use("dark_background")
 plt.rcParams["font.family"] = "DejaVu Sans"
 plt.rcParams["axes.titleweight"] = "bold"
@@ -1463,6 +1468,216 @@ def make_profile_dashboard_image(member, balance, net_worth, xp, trader_level, x
     return buffer
 
 
+# =========================
+# PROFILE CARD PNG ENGINE v2.0.2
+# =========================
+PROFILE_CARD_WIDTH = 1200
+PROFILE_CARD_HEIGHT = 675
+
+PROFILE_CARD_THEMES = {
+    "standard": {
+        "name": "Standard",
+        "bg": (14, 17, 23),
+        "panel": (17, 24, 39),
+        "panel_2": (31, 41, 55),
+        "text": (248, 250, 252),
+        "muted": (156, 163, 175),
+        "accent": (56, 189, 248),
+        "accent_2": (34, 197, 94),
+        "danger": (239, 68, 68),
+    },
+    "theme_dark_exchange": {
+        "name": "Dark Exchange",
+        "bg": (3, 7, 18),
+        "panel": (15, 23, 42),
+        "panel_2": (30, 41, 59),
+        "text": (248, 250, 252),
+        "muted": (148, 163, 184),
+        "accent": (139, 92, 246),
+        "accent_2": (34, 197, 94),
+        "danger": (248, 113, 113),
+    },
+    "theme_stadium": {
+        "name": "Stadium Lights",
+        "bg": (8, 47, 73),
+        "panel": (12, 74, 110),
+        "panel_2": (14, 116, 144),
+        "text": (240, 249, 255),
+        "muted": (186, 230, 253),
+        "accent": (250, 204, 21),
+        "accent_2": (34, 197, 94),
+        "danger": (248, 113, 113),
+    },
+}
+
+
+def _profile_card_theme_for_user(user_id):
+    """Restituisce la palette grafica della card in base al tema equipaggiato."""
+    theme_id = "standard"
+    try:
+        equipped = get_equipped_items(user_id)
+        theme_id = equipped.get("theme") or "standard"
+    except Exception:
+        theme_id = "standard"
+    return PROFILE_CARD_THEMES.get(theme_id, PROFILE_CARD_THEMES["standard"]), theme_id
+
+
+def _load_card_font(size, bold=False):
+    if ImageFont is None:
+        return None
+    candidates = []
+    if bold:
+        candidates += [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ]
+    candidates += [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_rounded(draw, box, radius, fill, outline=None, width=1):
+    try:
+        draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+    except Exception:
+        draw.rectangle(box, fill=fill, outline=outline, width=width)
+
+
+def _draw_text(draw, xy, text, font, fill, max_width=None):
+    text = str(text)
+    if max_width and font is not None:
+        while text:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                break
+            text = text[:-2] + "…"
+    draw.text(xy, text, font=font, fill=fill)
+
+
+def _make_circle_avatar(raw_bytes, size):
+    avatar = Image.open(io.BytesIO(raw_bytes)).convert("RGBA").resize((size, size))
+    mask = Image.new("L", (size, size), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.ellipse((0, 0, size - 1, size - 1), fill=255)
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(avatar, (0, 0), mask)
+    return out
+
+
+def _draw_stat_card(draw, box, label, value, theme, value_color=None):
+    _draw_rounded(draw, box, 22, theme["panel"], outline=theme["panel_2"], width=2)
+    x1, y1, x2, y2 = box
+    font_label = _load_card_font(24, False)
+    font_value = _load_card_font(38, True)
+    _draw_text(draw, (x1 + 24, y1 + 20), label, font_label, theme["muted"], max_width=(x2 - x1 - 48))
+    _draw_text(draw, (x1 + 24, y1 + 58), value, font_value, value_color or theme["text"], max_width=(x2 - x1 - 48))
+
+
+async def make_profile_card_png(member, metrics, trader_level, xp_current, xp_required, badge_ids=None):
+    """Genera una Profile Card PNG pronta per Discord.
+
+    La funzione è autonoma e non rompe il vecchio profilo: se Pillow non è
+    disponibile solleva un errore gestito dal comando !profile con fallback embed.
+    """
+    if Image is None or ImageDraw is None or ImageFont is None:
+        raise RuntimeError("Pillow non installato: impossibile generare la card PNG.")
+
+    badge_ids = badge_ids or []
+    user_id = str(member.id)
+    theme, theme_id = _profile_card_theme_for_user(user_id)
+
+    img = Image.new("RGB", (PROFILE_CARD_WIDTH, PROFILE_CARD_HEIGHT), theme["bg"])
+    draw = ImageDraw.Draw(img)
+
+    # Sfondo con bande diagonali leggere.
+    for i in range(-300, PROFILE_CARD_WIDTH + 300, 90):
+        draw.line((i, 0, i + 360, PROFILE_CARD_HEIGHT), fill=tuple(max(0, min(255, c + 12)) for c in theme["bg"]), width=2)
+
+    # Header panel.
+    _draw_rounded(draw, (45, 42, 1155, 204), 34, theme["panel"], outline=theme["panel_2"], width=2)
+
+    # Avatar.
+    avatar_size = 124
+    try:
+        avatar_bytes = await member.display_avatar.with_size(256).read()
+        avatar = _make_circle_avatar(avatar_bytes, avatar_size)
+        img.paste(avatar, (72, 61), avatar)
+        draw.ellipse((68, 57, 200, 189), outline=theme["accent"], width=5)
+    except Exception:
+        draw.ellipse((72, 61, 196, 185), fill=theme["panel_2"], outline=theme["accent"], width=5)
+        _draw_text(draw, (111, 101), "?", _load_card_font(48, True), theme["text"])
+
+    name_font = _load_card_font(48, True)
+    subtitle_font = _load_card_font(24, False)
+    small_font = _load_card_font(22, False)
+    chip_font = _load_card_font(22, True)
+
+    display_name = getattr(member, "display_name", "Trader")
+    _draw_text(draw, (225, 72), display_name, name_font, theme["text"], max_width=520)
+    _draw_text(draw, (228, 131), f"{trader_level} • Profile Card v2.0.2", subtitle_font, theme["muted"], max_width=560)
+
+    rank_text = f"#{metrics.get('rank')}" if metrics.get("rank") else "N/D"
+    _draw_rounded(draw, (885, 72, 1125, 132), 22, theme["panel_2"], outline=theme["accent"], width=2)
+    _draw_text(draw, (910, 88), f"🏆 Rank {rank_text}", chip_font, theme["text"], max_width=190)
+    _draw_rounded(draw, (885, 142, 1125, 180), 16, theme["bg"], outline=theme["panel_2"], width=1)
+    _draw_text(draw, (910, 151), f"Tema: {theme['name']}", small_font, theme["muted"], max_width=190)
+
+    # Statistiche centrali.
+    balance = float(metrics.get("balance", 0) or 0)
+    net_worth = float(metrics.get("net_worth", 0) or 0)
+    accuracy = float(metrics.get("accuracy", 0) or 0)
+    open_positions = int(metrics.get("open_positions", 0) or 0)
+    total_trades = int(metrics.get("total_trades", 0) or 0)
+    current_streak = int(metrics.get("current_streak", 0) or 0)
+    won = int(metrics.get("won_markets", 0) or 0)
+    lost = int(metrics.get("lost_markets", 0) or 0)
+
+    _draw_stat_card(draw, (45, 236, 365, 356), "Saldo", f"{balance:,.0f}".replace(",", "."), theme, theme["accent_2"])
+    _draw_stat_card(draw, (405, 236, 725, 356), "Patrimonio", f"{net_worth:,.0f}".replace(",", "."), theme, theme["accent"])
+    _draw_stat_card(draw, (765, 236, 1155, 356), "Accuracy", f"{accuracy:.1f}%", theme, theme["accent_2"] if accuracy >= 50 else theme["danger"])
+
+    _draw_stat_card(draw, (45, 386, 365, 506), "Trade totali", str(total_trades), theme)
+    _draw_stat_card(draw, (405, 386, 725, 506), "Posizioni aperte", str(open_positions), theme)
+    _draw_stat_card(draw, (765, 386, 1155, 506), "Streak", str(current_streak), theme, theme["accent"])
+
+    # Progress XP.
+    _draw_rounded(draw, (45, 536, 725, 626), 24, theme["panel"], outline=theme["panel_2"], width=2)
+    _draw_text(draw, (70, 556), "XP Trader", subtitle_font, theme["muted"])
+    xp_label = f"{xp_current}/{xp_required}" if str(xp_required) != "MAX" else f"{xp_current}/MAX"
+    _draw_text(draw, (520, 556), xp_label, subtitle_font, theme["text"], max_width=170)
+    bar_x, bar_y, bar_w, bar_h = 70, 596, 620, 14
+    _draw_rounded(draw, (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), 8, theme["panel_2"])
+    if str(xp_required) == "MAX":
+        pct = 1.0
+    else:
+        try:
+            pct = max(0.0, min(1.0, float(xp_current) / float(xp_required)))
+        except Exception:
+            pct = 0.0
+    _draw_rounded(draw, (bar_x, bar_y, bar_x + int(bar_w * pct), bar_y + bar_h), 8, theme["accent"])
+
+    # Badge e cosmetici.
+    _draw_rounded(draw, (765, 536, 1155, 626), 24, theme["panel"], outline=theme["panel_2"], width=2)
+    _draw_text(draw, (790, 556), "Badge / Vetrina", subtitle_font, theme["muted"])
+    badge_text = " • ".join(format_badge(b) for b in badge_ids[:5]) if badge_ids else "Nessun badge"
+    _draw_text(draw, (790, 591), badge_text, small_font, theme["text"], max_width=330)
+
+    # Footer sintetico.
+    _draw_text(draw, (48, 642), f"Mercati vinti/persi: {won}/{lost} • Tutti gli elementi Marketplace sono solo cosmetici", small_font, theme["muted"], max_width=1080)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG", optimize=True)
+    buffer.seek(0)
+    return buffer, theme_id
+
+
 
 
 # =========================
@@ -2670,6 +2885,48 @@ async def profile(ctx):
     rank = calculate_server_rank(user_id)
     rank_text = f"#{rank}" if rank else "N/D"
 
+    badge_ids = get_active_badges(user_id)
+    metrics = {
+        "balance": balance,
+        "net_worth": net_worth,
+        "open_positions": open_positions,
+        "total_trades": total_trades,
+        "accuracy": accuracy,
+        "current_streak": current_streak,
+        "best_streak": best_streak,
+        "won_markets": won_markets,
+        "lost_markets": lost_markets,
+        "resolved_markets": resolved_markets,
+        "rank": rank,
+    }
+
+    # v2.0.2: Profile Card PNG. Se l'ambiente non ha Pillow o Discord non riesce
+    # a scaricare l'avatar, il comando torna automaticamente al vecchio embed.
+    try:
+        card_buffer, theme_id = await make_profile_card_png(
+            ctx.author,
+            metrics,
+            trader_level,
+            xp_current,
+            xp_required,
+            badge_ids=badge_ids,
+        )
+        file = discord.File(card_buffer, filename=f"profile_card_{ctx.author.id}.png")
+        embed = discord.Embed(
+            title=f"👤 Profilo di {ctx.author.display_name}",
+            description="Profile Card grafica v2.0.2",
+            color=COLOR_BLUE,
+        )
+        embed.set_image(url=f"attachment://profile_card_{ctx.author.id}.png")
+        embed.add_field(name="🎨 Tema card", value=theme_id.replace("theme_", "").replace("_", " ").title(), inline=True)
+        embed.add_field(name="⭐ Livello server", value=server_level, inline=True)
+        embed.add_field(name="💹 Livello trader", value=trader_level, inline=True)
+        apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo • Card PNG v2.0.2")
+        await ctx.send(embed=embed, file=file)
+        return
+    except Exception as e:
+        print(f"[PROFILE CARD] Fallback embed per {user_id}: {e}")
+
     color = COLOR_BLUE
     profit_emoji = "🟢" if open_profit >= 0 else "🔴"
 
@@ -2700,14 +2957,13 @@ async def profile(ctx):
     embed.add_field(name="❌ Mercati persi", value=str(lost_markets), inline=True)
     embed.add_field(name="📊 Mercati risolti", value=str(resolved_markets), inline=True)
 
-    badge_ids = get_active_badges(user_id)
     badge_text = " • ".join(format_badge(b) for b in badge_ids[:12]) if badge_ids else "Nessun badge sbloccato."
     if len(badge_text) > 1024:
         badge_text = badge_text[:1000] + "..."
     embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
     embed.add_field(name="🎨 Marketplace", value=get_equipped_items_text(user_id), inline=False)
 
-    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo")
+    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo • Fallback embed")
 
     await ctx.send(embed=embed)
 
@@ -5593,28 +5849,3 @@ async def on_ready():
 # RUN
 # =========================
 bot.run(token)
-
-
-# ==========================================================
-# V2.0.2 ROADMAP UPDATE - PROFILE CARD PNG & MARKETPLACE
-# ==========================================================
-# Nuove specifiche implementative da sviluppare:
-#
-# - Sostituire il focus delle vecchie cornici con una Profile Card PNG.
-# - Ogni utente possiede una card Standard gratuita.
-# - I temi acquistati nello Shop modificano completamente la grafica della card.
-# - Gli oggetti collezionabili devono comparire sia sulla card PNG sia negli embed.
-# - Gli embed (!profile, !portfolio, !leaderboard, ecc.) devono adattarsi
-#   automaticamente al tema equipaggiato.
-# - Marketplace riorganizzato in:
-#       * Temi
-#       * Collezionabili
-#       * Bundle
-#       * Casse
-#       * Oggetti limitati
-# - Tutti gli acquisti restano esclusivamente cosmetici.
-# - Riesaminare e verificare il corretto funzionamento di:
-#       shop, inventario, equipaggiamento, bundle, casse,
-#       categorie, admin shop e relative interazioni.
-# ==========================================================
-
