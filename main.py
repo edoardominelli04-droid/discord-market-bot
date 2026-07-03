@@ -1572,19 +1572,29 @@ def _make_circle_avatar(raw_bytes, size):
 
 
 def _draw_stat_card(draw, box, label, value, theme, value_color=None):
-    _draw_rounded(draw, box, 22, theme["panel"], outline=theme["panel_2"], width=2)
+    """Disegna un pannello statistico Standard v2.0.2.
+
+    Redesign card Standard:
+    - numero grande sopra;
+    - etichetta piccola sotto;
+    - pannello arrotondato e pulito;
+    - nessuna texture o riga di sfondo.
+    """
+    _draw_rounded(draw, box, 28, theme["panel"], outline=theme["panel_2"], width=2)
     x1, y1, x2, y2 = box
-    font_label = _load_card_font(24, False)
-    font_value = _load_card_font(38, True)
-    _draw_text(draw, (x1 + 24, y1 + 20), label, font_label, theme["muted"], max_width=(x2 - x1 - 48))
-    _draw_text(draw, (x1 + 24, y1 + 58), value, font_value, value_color or theme["text"], max_width=(x2 - x1 - 48))
+    font_value = _load_card_font(46, True)
+    font_label = _load_card_font(23, False)
+    _draw_text(draw, (x1 + 26, y1 + 26), value, font_value, value_color or theme["text"], max_width=(x2 - x1 - 52))
+    _draw_text(draw, (x1 + 28, y1 + 83), label.upper(), font_label, theme["muted"], max_width=(x2 - x1 - 56))
 
 
 async def make_profile_card_png(member, metrics, trader_level, xp_current, xp_required, badge_ids=None):
-    """Genera una Profile Card PNG pronta per Discord.
+    """Genera la Profile Card PNG Standard ridisegnata per Discord.
 
-    La funzione è autonoma e non rompe il vecchio profilo: se Pillow non è
-    disponibile solleva un errore gestito dal comando !profile con fallback embed.
+    La card usa uno sfondo a tinta unita, avatar grande, username dominante,
+    livello trader e rank sotto il nome, più pannelli statistici con numero sopra
+    ed etichetta sotto. Se Pillow non è disponibile, il comando !profile usa il
+    fallback embed già previsto.
     """
     if Image is None or ImageDraw is None or ImageFont is None:
         raise RuntimeError("Pillow non installato: impossibile generare la card PNG.")
@@ -1593,43 +1603,55 @@ async def make_profile_card_png(member, metrics, trader_level, xp_current, xp_re
     user_id = str(member.id)
     theme, theme_id = _profile_card_theme_for_user(user_id)
 
+    # Sfondo Standard: tinta unita, senza righe, texture o pattern.
     img = Image.new("RGB", (PROFILE_CARD_WIDTH, PROFILE_CARD_HEIGHT), theme["bg"])
     draw = ImageDraw.Draw(img)
 
-    # Sfondo con bande diagonali leggere.
-    for i in range(-300, PROFILE_CARD_WIDTH + 300, 90):
-        draw.line((i, 0, i + 360, PROFILE_CARD_HEIGHT), fill=tuple(max(0, min(255, c + 12)) for c in theme["bg"]), width=2)
+    # Layout principale.
+    margin = 48
+    header_box = (margin, 44, PROFILE_CARD_WIDTH - margin, 232)
+    _draw_rounded(draw, header_box, 38, theme["panel"], outline=theme["panel_2"], width=2)
 
-    # Header panel.
-    _draw_rounded(draw, (45, 42, 1155, 204), 34, theme["panel"], outline=theme["panel_2"], width=2)
-
-    # Avatar.
-    avatar_size = 124
+    # Avatar più grande.
+    avatar_size = 158
+    avatar_x, avatar_y = 78, 59
     try:
         avatar_bytes = await member.display_avatar.with_size(256).read()
         avatar = _make_circle_avatar(avatar_bytes, avatar_size)
-        img.paste(avatar, (72, 61), avatar)
-        draw.ellipse((68, 57, 200, 189), outline=theme["accent"], width=5)
+        img.paste(avatar, (avatar_x, avatar_y), avatar)
+        draw.ellipse(
+            (avatar_x - 5, avatar_y - 5, avatar_x + avatar_size + 5, avatar_y + avatar_size + 5),
+            outline=theme["accent_2"],
+            width=6,
+        )
     except Exception:
-        draw.ellipse((72, 61, 196, 185), fill=theme["panel_2"], outline=theme["accent"], width=5)
-        _draw_text(draw, (111, 101), "?", _load_card_font(48, True), theme["text"])
-
-    name_font = _load_card_font(48, True)
-    subtitle_font = _load_card_font(24, False)
-    small_font = _load_card_font(22, False)
-    chip_font = _load_card_font(22, True)
+        draw.ellipse(
+            (avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size),
+            fill=theme["panel_2"],
+            outline=theme["accent_2"],
+            width=6,
+        )
+        _draw_text(draw, (avatar_x + 55, avatar_y + 42), "?", _load_card_font(64, True), theme["text"])
 
     display_name = getattr(member, "display_name", "Trader")
-    _draw_text(draw, (225, 72), display_name, name_font, theme["text"], max_width=520)
-    _draw_text(draw, (228, 131), f"{trader_level} • Profile Card v2.0.2", subtitle_font, theme["muted"], max_width=560)
-
     rank_text = f"#{metrics.get('rank')}" if metrics.get("rank") else "N/D"
-    _draw_rounded(draw, (885, 72, 1125, 132), 22, theme["panel_2"], outline=theme["accent"], width=2)
-    _draw_text(draw, (910, 88), f"🏆 Rank {rank_text}", chip_font, theme["text"], max_width=190)
-    _draw_rounded(draw, (885, 142, 1125, 180), 16, theme["bg"], outline=theme["panel_2"], width=1)
-    _draw_text(draw, (910, 151), f"Tema: {theme['name']}", small_font, theme["muted"], max_width=190)
 
-    # Statistiche centrali.
+    name_font = _load_card_font(66, True)
+    meta_font = _load_card_font(26, False)
+    chip_font = _load_card_font(24, True)
+    small_font = _load_card_font(21, False)
+
+    # Username molto più grande; livello e rank più piccoli sotto il nome.
+    text_x = 270
+    _draw_text(draw, (text_x, 76), display_name, name_font, theme["text"], max_width=660)
+    _draw_text(draw, (text_x + 2, 154), f"{trader_level}  •  Rank globale {rank_text}", meta_font, theme["muted"], max_width=640)
+
+    # Chip tema, discreto.
+    _draw_rounded(draw, (938, 84, 1116, 134), 22, theme["bg"], outline=theme["panel_2"], width=1)
+    _draw_text(draw, (963, 98), "STANDARD" if theme_id == "standard" else theme["name"].upper(), chip_font, theme["accent_2"], max_width=132)
+    _draw_text(draw, (943, 151), "Profile Card v2.0.2", small_font, theme["muted"], max_width=170)
+
+    # Statistiche.
     balance = float(metrics.get("balance", 0) or 0)
     net_worth = float(metrics.get("net_worth", 0) or 0)
     accuracy = float(metrics.get("accuracy", 0) or 0)
@@ -1639,20 +1661,35 @@ async def make_profile_card_png(member, metrics, trader_level, xp_current, xp_re
     won = int(metrics.get("won_markets", 0) or 0)
     lost = int(metrics.get("lost_markets", 0) or 0)
 
-    _draw_stat_card(draw, (45, 236, 365, 356), "Saldo", f"{balance:,.0f}".replace(",", "."), theme, theme["accent_2"])
-    _draw_stat_card(draw, (405, 236, 725, 356), "Patrimonio", f"{net_worth:,.0f}".replace(",", "."), theme, theme["accent"])
-    _draw_stat_card(draw, (765, 236, 1155, 356), "Accuracy", f"{accuracy:.1f}%", theme, theme["accent_2"] if accuracy >= 50 else theme["danger"])
+    # Pannelli arrotondati: numero sopra, etichetta sotto.
+    card_w, card_h = 338, 134
+    gap_x, gap_y = 32, 30
+    x1 = margin
+    y1 = 270
+    boxes = [
+        (x1, y1, x1 + card_w, y1 + card_h),
+        (x1 + card_w + gap_x, y1, x1 + 2 * card_w + gap_x, y1 + card_h),
+        (x1 + 2 * (card_w + gap_x), y1, x1 + 3 * card_w + 2 * gap_x, y1 + card_h),
+        (x1, y1 + card_h + gap_y, x1 + card_w, y1 + 2 * card_h + gap_y),
+        (x1 + card_w + gap_x, y1 + card_h + gap_y, x1 + 2 * card_w + gap_x, y1 + 2 * card_h + gap_y),
+        (x1 + 2 * (card_w + gap_x), y1 + card_h + gap_y, x1 + 3 * card_w + 2 * gap_x, y1 + 2 * card_h + gap_y),
+    ]
 
-    _draw_stat_card(draw, (45, 386, 365, 506), "Trade totali", str(total_trades), theme)
-    _draw_stat_card(draw, (405, 386, 725, 506), "Posizioni aperte", str(open_positions), theme)
-    _draw_stat_card(draw, (765, 386, 1155, 506), "Streak", str(current_streak), theme, theme["accent"])
+    _draw_stat_card(draw, boxes[0], "Saldo", f"{balance:,.0f}".replace(",", "."), theme, theme["accent_2"])
+    _draw_stat_card(draw, boxes[1], "Patrimonio", f"{net_worth:,.0f}".replace(",", "."), theme, theme["accent_2"])
+    _draw_stat_card(draw, boxes[2], "Accuracy", f"{accuracy:.1f}%", theme, theme["accent_2"] if accuracy >= 50 else theme["danger"])
+    _draw_stat_card(draw, boxes[3], "Trade", str(total_trades), theme)
+    _draw_stat_card(draw, boxes[4], "Posizioni aperte", str(open_positions), theme)
+    _draw_stat_card(draw, boxes[5], "Streak", str(current_streak), theme, theme["accent"])
 
-    # Progress XP.
-    _draw_rounded(draw, (45, 536, 725, 626), 24, theme["panel"], outline=theme["panel_2"], width=2)
-    _draw_text(draw, (70, 556), "XP Trader", subtitle_font, theme["muted"])
+    # Barra XP bassa e pulita.
+    xp_box = (margin, 594, 792, 646)
+    _draw_rounded(draw, xp_box, 22, theme["panel"], outline=theme["panel_2"], width=2)
     xp_label = f"{xp_current}/{xp_required}" if str(xp_required) != "MAX" else f"{xp_current}/MAX"
-    _draw_text(draw, (520, 556), xp_label, subtitle_font, theme["text"], max_width=170)
-    bar_x, bar_y, bar_w, bar_h = 70, 596, 620, 14
+    _draw_text(draw, (72, 608), "XP Trader", small_font, theme["muted"])
+    _draw_text(draw, (650, 608), xp_label, small_font, theme["text"], max_width=110)
+
+    bar_x, bar_y, bar_w, bar_h = 190, 616, 430, 12
     _draw_rounded(draw, (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), 8, theme["panel_2"])
     if str(xp_required) == "MAX":
         pct = 1.0
@@ -1661,16 +1698,24 @@ async def make_profile_card_png(member, metrics, trader_level, xp_current, xp_re
             pct = max(0.0, min(1.0, float(xp_current) / float(xp_required)))
         except Exception:
             pct = 0.0
-    _draw_rounded(draw, (bar_x, bar_y, bar_x + int(bar_w * pct), bar_y + bar_h), 8, theme["accent"])
+    if pct > 0:
+        _draw_rounded(draw, (bar_x, bar_y, bar_x + max(8, int(bar_w * pct)), bar_y + bar_h), 8, theme["accent_2"])
 
-    # Badge e cosmetici.
-    _draw_rounded(draw, (765, 536, 1155, 626), 24, theme["panel"], outline=theme["panel_2"], width=2)
-    _draw_text(draw, (790, 556), "Badge / Vetrina", subtitle_font, theme["muted"])
-    badge_text = " • ".join(format_badge(b) for b in badge_ids[:5]) if badge_ids else "Nessun badge"
-    _draw_text(draw, (790, 591), badge_text, small_font, theme["text"], max_width=330)
+    # Vetrina badge/collezionabili: per ora mostra badge attivi, in attesa dello Shop 2.0.
+    badge_box = (820, 594, 1152, 646)
+    _draw_rounded(draw, badge_box, 22, theme["panel"], outline=theme["panel_2"], width=2)
+    badge_text = " • ".join(format_badge(b) for b in badge_ids[:3]) if badge_ids else "Badge in arrivo"
+    _draw_text(draw, (842, 609), badge_text, small_font, theme["text"], max_width=286)
 
-    # Footer sintetico.
-    _draw_text(draw, (48, 642), f"Mercati vinti/persi: {won}/{lost} • Tutti gli elementi Marketplace sono solo cosmetici", small_font, theme["muted"], max_width=1080)
+    # Footer minimale.
+    _draw_text(
+        draw,
+        (52, 657),
+        f"Mercati vinti/persi: {won}/{lost}  •  Cosmetici Marketplace senza vantaggi gameplay",
+        _load_card_font(18, False),
+        theme["muted"],
+        max_width=1070,
+    )
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG", optimize=True)
