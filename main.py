@@ -77,17 +77,22 @@ LAST_CALENDAR_POST_DATE = None
 # Canale dedicato ai risultati dei mercati risolti automaticamente.
 RESULTS_CHANNEL_ID = 1522189230128762971
 
-# Canale dedicato alle notizie automatiche v2.0.0.
-MARKET_PULSE_CHANNEL_ID = 1522564253725364295
+# Canale dedicato alle notizie automatiche / Gazzetta v2.0.1.
+GAZZETTA_CHANNEL_ID = 1522564253725364295
+MARKET_PULSE_CHANNEL_ID = GAZZETTA_CHANNEL_ID  # alias retrocompatibile
 
-# API News v2.0.0
-# GNEWS_API_KEY: news sportive generali via GNews.
+# API News + Live v2.0.1
+# GNEWS_API_KEY: notizie calcistiche via GNews.
+# SPORTMONKS_API_TOKEN: live calcio via Sportmonks.
 # API_FOOTBALL_KEY: opzionale, per fonti API-Football/API-Sports se disponibili.
 GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY")
+SPORTMONKS_API_TOKEN = os.environ.get("SPORTMONKS_API_TOKEN") or os.environ.get("SPORTMONKS_TOKEN")
+SPORTMONKS_BASE_URL = os.environ.get("SPORTMONKS_BASE_URL", "https://api.sportmonks.com/v3/football")
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
 API_FOOTBALL_HOST = os.environ.get("API_FOOTBALL_HOST", "v3.football.api-sports.io")
 API_FOOTBALL_NEWS_URL = os.environ.get("API_FOOTBALL_NEWS_URL")
 NEWS_LOOP_MINUTES = 30
+GAZZETTA_LIVE_LOOP_SECONDS = 90
 
 # Canale dedicato al registro delle attività admin.
 ACTIVITY_LOG_CHANNEL_ID = 1522190483713953813
@@ -321,6 +326,51 @@ def safe_entry_price(entry_price, fallback_price):
     return entry_price
 
 
+def signed_fmt(value):
+    try:
+        value = float(value)
+    except Exception:
+        value = 0.0
+    return f"{value:+.1f}%"
+
+
+def calculate_market_change(market_id):
+    """Variazione YES dall'inizio della cronologia disponibile all'ultimo prezzo."""
+    c.execute("""
+        SELECT yes_price
+        FROM price_history
+        WHERE market_id=?
+        ORDER BY id ASC
+    """, (market_id,))
+    prices = [float(r[0] or 50.0) for r in c.fetchall()]
+    if len(prices) < 2:
+        return 0.0
+    return prices[-1] - prices[0]
+
+
+def get_market_volume_stats(market_id):
+    c.execute("""
+        SELECT
+            COALESCE(trade_count, 0),
+            COALESCE(buy_volume, 0),
+            COALESCE(sell_volume, 0),
+            COALESCE(total_volume, 0),
+            COALESCE(total_pool, 0)
+        FROM markets
+        WHERE id=?
+    """, (market_id,))
+    row = c.fetchone()
+    if not row:
+        return {"trades": 0, "buy_volume": 0, "sell_volume": 0, "total_volume": 0, "liquidity": 0}
+    return {
+        "trades": row[0] or 0,
+        "buy_volume": row[1] or 0,
+        "sell_volume": row[2] or 0,
+        "total_volume": row[3] or 0,
+        "liquidity": row[4] or 0,
+    }
+
+
 # =========================
 # DATABASE
 # =========================
@@ -451,7 +501,11 @@ for statement in [
     "ALTER TABLE trades ADD COLUMN closed INTEGER DEFAULT 0",
     "ALTER TABLE markets ADD COLUMN channel_id TEXT",
     "ALTER TABLE markets ADD COLUMN alert_yes_price REAL",
-    "ALTER TABLE markets ADD COLUMN event_category TEXT"
+    "ALTER TABLE markets ADD COLUMN event_category TEXT",
+    "ALTER TABLE markets ADD COLUMN trade_count INTEGER DEFAULT 0",
+    "ALTER TABLE markets ADD COLUMN buy_volume INTEGER DEFAULT 0",
+    "ALTER TABLE markets ADD COLUMN sell_volume INTEGER DEFAULT 0",
+    "ALTER TABLE markets ADD COLUMN total_volume INTEGER DEFAULT 0"
 ]:
     try:
         c.execute(statement)
@@ -2258,8 +2312,11 @@ async def market(ctx, market_id: int):
     embed.add_field(name="📉 Stato mercato", value=status, inline=True)
     embed.add_field(name="🟢 YES", value=f"**{yes_p}%**\n`{progress_bar(yes_p)}`", inline=True)
     embed.add_field(name="🔴 NO", value=f"**{no_p}%**\n`{progress_bar(no_p)}`", inline=True)
+    volume_stats = get_market_volume_stats(market_id)
     embed.add_field(name="💰 Pool totale", value=str(total), inline=True)
-    embed.set_footer(text="Usa !buy, !sell, !chart oppure gli alias italiani !compra, !vendi, !grafico")
+    embed.add_field(name="📦 Volume", value=f"{volume_stats['total_volume']} crediti", inline=True)
+    embed.add_field(name="🔁 Trade", value=str(volume_stats['trades']), inline=True)
+    embed.set_footer(text="Usa !buy, !sell, !chart, !volume oppure gli alias italiani !compra, !vendi, !grafico")
 
     await ctx.send(embed=embed)
 
@@ -2317,7 +2374,8 @@ async def portfolio(ctx):
             f"**Mercato {market_id}** | {emoji} **{side}** | {status}\n"
             f"❓ {short_question}\n"
             f"💸 Investito: **{invested:.0f}** | 📈 Valore: **{current_value:.0f}** | 💰 Vincita: **{possible_win:.0f}**\n"
-            f"📊 P/L: **{profit:+.0f}** ({profit_pct:+.1f}%)"
+            f"🎯 Prezzo medio: **{entry_price:.1f}%** | 📍 Prezzo attuale: **{current_price:.1f}%**\n"
+            f"📊 P/L non realizzato: **{profit:+.0f}** ({profit_pct:+.1f}%)"
         )
 
     total_profit = total_value - total_invested
@@ -2581,6 +2639,61 @@ async def leaderboard(ctx):
 # =========================
 @bot.command(aliases=["diretta"])
 async def live(ctx):
+    """Live v2.0.1: usa Sportmonks per eventi completi, con fallback su football-data.org."""
+    if SPORTMONKS_API_TOKEN:
+        await live_sportmonks(ctx)
+    else:
+        await live_football_data_fallback(ctx)
+
+
+async def live_sportmonks(ctx):
+    status, data = sportmonks_get(
+        "fixtures/live",
+        params={
+            "include": "participants;scores;events.type;state;league"
+        }
+    )
+
+    if status != 200:
+        await ctx.send("⚠️ Sportmonks non disponibile ora. Uso il fallback football-data.org.")
+        await live_football_data_fallback(ctx)
+        return
+
+    fixtures = data.get("data") or []
+    if not fixtures:
+        await ctx.send("📭 Nessuna partita live in questo momento")
+        return
+
+    embed = discord.Embed(
+        title="🔴 Live calcio",
+        description="Dati live da Sportmonks • eventi minuto per minuto",
+        color=COLOR_RED,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    for fixture in fixtures[:8]:
+        home, away = sportmonks_fixture_teams(fixture)
+        score = sportmonks_fixture_score(fixture)
+        minute = sportmonks_fixture_minute(fixture)
+        state = sportmonks_fixture_state(fixture)
+        league = sportmonks_fixture_league(fixture)
+        events = sportmonks_fixture_events_summary(fixture)
+
+        embed.add_field(
+            name=f"⚽ {home} vs {away}",
+            value=(
+                f"🏆 {league}\n"
+                f"📊 Risultato: **{score}** | ⏱️ {minute} | 📡 {state}\n"
+                f"{events}"
+            )[:1024],
+            inline=False
+        )
+
+    embed.set_footer(text="Comando disponibile anche come !diretta • v2.0.1")
+    await ctx.send(embed=embed)
+
+
+async def live_football_data_fallback(ctx):
     c.execute("""
         SELECT id, question, yes_pool, no_pool, total_pool, match_key
         FROM markets
@@ -2595,6 +2708,7 @@ async def live(ctx):
 
     embed = discord.Embed(
         title="🔴 Mercati live",
+        description="Fallback football-data.org",
         color=COLOR_RED
     )
     found_live = False
@@ -2613,7 +2727,7 @@ async def live(ctx):
         if not res:
             continue
 
-        if res["status"] not in ["IN_PLAY", "PAUSED"]:
+        if res["status"] not in ["IN_PLAY", "PAUSED", "LIVE"]:
             continue
 
         found_live = True
@@ -2641,6 +2755,103 @@ async def live(ctx):
 
     embed.set_footer(text="Comando disponibile anche come !diretta")
     await ctx.send(embed=embed)
+
+
+def sportmonks_fixture_teams(fixture):
+    participants = fixture.get("participants") or []
+    home = "Casa"
+    away = "Trasferta"
+    for p in participants:
+        meta = p.get("meta") or {}
+        location = str(meta.get("location", "")).lower()
+        name = p.get("name") or p.get("short_code") or "Squadra"
+        if location == "home":
+            home = name
+        elif location == "away":
+            away = name
+    if home == "Casa" and len(participants) >= 1:
+        home = participants[0].get("name") or home
+    if away == "Trasferta" and len(participants) >= 2:
+        away = participants[1].get("name") or away
+    return home, away
+
+
+def sportmonks_fixture_score(fixture):
+    scores = fixture.get("scores") or []
+    home_score = away_score = None
+    for s in scores:
+        score_data = s.get("score") or {}
+        goals = score_data.get("goals")
+        participant = str(s.get("description") or s.get("participant") or "").lower()
+        if "home" in participant:
+            home_score = goals
+        elif "away" in participant:
+            away_score = goals
+    if home_score is None or away_score is None:
+        return "N/D"
+    return f"{home_score}-{away_score}"
+
+
+def sportmonks_fixture_minute(fixture):
+    minute = fixture.get("minute") or fixture.get("current_minute") or fixture.get("time")
+    extra = fixture.get("extra_minute") or fixture.get("added_time")
+    if minute and extra:
+        return f"{minute}+{extra}'"
+    if minute:
+        return f"{minute}'"
+    return "N/D"
+
+
+def sportmonks_fixture_state(fixture):
+    state = fixture.get("state") or {}
+    if isinstance(state, dict):
+        return state.get("name") or state.get("short_name") or fixture.get("status") or "LIVE"
+    return str(state or fixture.get("status") or "LIVE")
+
+
+def sportmonks_fixture_league(fixture):
+    league = fixture.get("league") or {}
+    if isinstance(league, dict):
+        return league.get("name") or "Competizione"
+    return "Competizione"
+
+
+def sportmonks_event_label(event):
+    type_data = event.get("type") or {}
+    type_name = ""
+    if isinstance(type_data, dict):
+        type_name = (type_data.get("name") or type_data.get("code") or "").lower()
+    type_name = type_name or str(event.get("type_id") or "").lower()
+
+    if "goal" in type_name:
+        return "⚽ Goal"
+    if "red" in type_name:
+        return "🟥 Espulsione"
+    if "yellow" in type_name:
+        return "🟨 Ammonizione"
+    if "substitution" in type_name or "subst" in type_name:
+        return "🔄 Sostituzione"
+    if "lineup" in type_name:
+        return "📋 Formazione"
+    return "🟢 INFO"
+
+
+def sportmonks_fixture_events_summary(fixture):
+    events = fixture.get("events") or []
+    if not events:
+        return "📭 Nessun evento dettagliato disponibile."
+
+    lines = []
+    for ev in events[-5:]:
+        minute = ev.get("minute") or ev.get("time") or ""
+        player = ev.get("player_name") or ev.get("player", {}).get("name") if isinstance(ev.get("player"), dict) else ev.get("player_name")
+        team = ev.get("participant_name") or ev.get("team_name") or ""
+        label = sportmonks_event_label(ev)
+        prefix = f"{minute}' " if minute else ""
+        body = player or team or "Evento live"
+        lines.append(f"{label} {prefix}{body}")
+
+    return "\n".join(lines)
 
 # =========================
 # BUY + PRICE UPDATE
@@ -2689,16 +2900,22 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         c.execute("""
             UPDATE markets
             SET yes_pool = yes_pool + ?,
-                total_pool = total_pool + ?
+                total_pool = total_pool + ?,
+                trade_count = COALESCE(trade_count, 0) + 1,
+                buy_volume = COALESCE(buy_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
             WHERE id=?
-        """, (amount, amount, market_id))
+        """, (amount, amount, amount, amount, market_id))
     else:
         c.execute("""
             UPDATE markets
             SET no_pool = no_pool + ?,
-                total_pool = total_pool + ?
+                total_pool = total_pool + ?,
+                trade_count = COALESCE(trade_count, 0) + 1,
+                buy_volume = COALESCE(buy_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
             WHERE id=?
-        """, (amount, amount, market_id))
+        """, (amount, amount, amount, amount, market_id))
 
     c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
     yes, no = c.fetchone()
@@ -2726,6 +2943,8 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     embed.add_field(name="💸 Puntata", value=f"+{amount}", inline=True)
     embed.add_field(name="🟢 YES", value=f"{yes_p}%", inline=True)
     embed.add_field(name="🔴 NO", value=f"{no_p}%", inline=True)
+    volume_stats = get_market_volume_stats(market_id)
+    embed.add_field(name="📦 Volume mercato", value=f"{volume_stats['total_volume']} crediti", inline=True)
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
 
     await ctx.send(embed=embed)
@@ -2834,17 +3053,23 @@ async def sell(ctx, market_id: int, percent: str, side: str = None):
         c.execute("""
             UPDATE markets
             SET yes_pool = yes_pool - ?,
-                total_pool = MAX(total_pool - ?, 0)
+                total_pool = MAX(total_pool - ?, 0),
+                trade_count = COALESCE(trade_count, 0) + 1,
+                sell_volume = COALESCE(sell_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
             WHERE id=?
-        """, (pool_reduction, pool_reduction, market_id))
+        """, (pool_reduction, pool_reduction, sell_amount, sell_amount, market_id))
     else:
         pool_reduction = min(pool_reduction, no_pool)
         c.execute("""
             UPDATE markets
             SET no_pool = no_pool - ?,
-                total_pool = MAX(total_pool - ?, 0)
+                total_pool = MAX(total_pool - ?, 0),
+                trade_count = COALESCE(trade_count, 0) + 1,
+                sell_volume = COALESCE(sell_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
             WHERE id=?
-        """, (pool_reduction, pool_reduction, market_id))
+        """, (pool_reduction, pool_reduction, sell_amount, sell_amount, market_id))
 
     c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (proceeds, user_id))
 
@@ -2869,12 +3094,134 @@ async def sell(ctx, market_id: int, percent: str, side: str = None):
     embed.add_field(name="💰 Incassato", value=str(proceeds), inline=True)
     embed.add_field(name="📊 Profitto/Perdita", value=f"{profit:+.0f}", inline=True)
     embed.add_field(name="💼 Saldo aggiornato", value=str(bal), inline=True)
+    embed.add_field(name="🎯 Prezzo medio", value=f"{avg_entry_price:.1f}%", inline=True)
+    embed.add_field(name="📍 Prezzo vendita", value=f"{current_price:.1f}%", inline=True)
     embed.add_field(name="🟢 YES", value=f"{new_yes_p}%", inline=True)
     embed.add_field(name="🔴 NO", value=f"{new_no_p}%", inline=True)
+    volume_stats = get_market_volume_stats(market_id)
+    embed.add_field(name="📦 Volume mercato", value=f"{volume_stats['total_volume']} crediti", inline=True)
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(new_yes_p)}`", inline=False)
 
     await ctx.send(embed=embed)
     await evaluate_user_badges(user_id, notify=True)
+
+
+# =========================
+# V2.0.2 MARKET VOLUME + TOP MOVERS
+# =========================
+@bot.command(aliases=["volumi", "liquidita"])
+async def volume(ctx, market_id: int = None):
+    """Mostra volume e liquidità di un mercato o la top per volume."""
+    if market_id is not None:
+        c.execute("""
+            SELECT question, yes_pool, no_pool, active, resolved, result
+            FROM markets
+            WHERE id=?
+        """, (market_id,))
+        row = c.fetchone()
+        if not row:
+            await ctx.send("❌ Mercato non trovato")
+            return
+
+        question, yes_pool, no_pool, active, resolved, result = row
+        yes_p, no_p = market_probabilities(yes_pool, no_pool)
+        stats = get_market_volume_stats(market_id)
+        change = calculate_market_change(market_id)
+        status = "🟢 Attivo" if active else (f"⚪ Risolto: {result}" if resolved else "⚪ Chiuso")
+
+        embed = discord.Embed(
+            title=f"📦 Volume mercato #{market_id}",
+            description=question,
+            color=COLOR_CYAN
+        )
+        embed.add_field(name="📉 Stato", value=status, inline=True)
+        embed.add_field(name="💧 Liquidità", value=f"{stats['liquidity']} crediti", inline=True)
+        embed.add_field(name="📦 Volume totale", value=f"{stats['total_volume']} crediti", inline=True)
+        embed.add_field(name="🛒 Volume buy", value=f"{stats['buy_volume']} crediti", inline=True)
+        embed.add_field(name="💸 Volume sell", value=f"{stats['sell_volume']} crediti", inline=True)
+        embed.add_field(name="🔁 Operazioni", value=str(stats['trades']), inline=True)
+        embed.add_field(name="🟢 YES", value=f"{yes_p}%", inline=True)
+        embed.add_field(name="🔴 NO", value=f"{no_p}%", inline=True)
+        embed.add_field(name="🚀 Movimento YES", value=signed_fmt(change), inline=True)
+        embed.set_footer(text="v2.0.2 • Volume, liquidità e movimento del mercato")
+        await ctx.send(embed=embed)
+        return
+
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool,
+               COALESCE(total_volume, 0), COALESCE(trade_count, 0), COALESCE(total_pool, 0)
+        FROM markets
+        ORDER BY COALESCE(total_volume, 0) DESC, id DESC
+        LIMIT 10
+    """)
+    rows = c.fetchall()
+    if not rows:
+        await ctx.send("📭 Nessun mercato disponibile.")
+        return
+
+    lines = []
+    for mid, question, yes_pool, no_pool, total_volume, trade_count, liquidity in rows:
+        yes_p, no_p = market_probabilities(yes_pool, no_pool)
+        short_q = question if len(question) <= 70 else question[:67] + "..."
+        lines.append(
+            f"**#{mid}** • 📦 **{total_volume}** crediti • 💧 {liquidity} • 🔁 {trade_count}\n"
+            f"{short_q}\n🟢 YES {yes_p}% | 🔴 NO {no_p}%"
+        )
+
+    embed = discord.Embed(
+        title="📦 Mercati per volume",
+        description="\n\n".join(lines),
+        color=COLOR_CYAN
+    )
+    embed.set_footer(text="Usa !volume ID per il dettaglio di un mercato")
+    await ctx.send(embed=embed)
+
+
+@bot.command(aliases=["topmover", "movers", "movimenti"])
+async def topmovers(ctx):
+    """Mostra i mercati con i movimenti più forti del prezzo YES."""
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool,
+               COALESCE(total_volume, 0), COALESCE(trade_count, 0), active, resolved
+        FROM markets
+        ORDER BY id DESC
+        LIMIT 80
+    """)
+    rows = c.fetchall()
+
+    movers = []
+    for mid, question, yes_pool, no_pool, total_volume, trade_count, active, resolved in rows:
+        change = calculate_market_change(mid)
+        if abs(change) < 0.1 and total_volume <= 0:
+            continue
+        yes_p, no_p = market_probabilities(yes_pool, no_pool)
+        movers.append((abs(change), change, mid, question, yes_p, no_p, total_volume, trade_count, active, resolved))
+
+    movers.sort(reverse=True, key=lambda x: x[0])
+    movers = movers[:10]
+
+    if not movers:
+        await ctx.send("📭 Non ci sono ancora movimenti sufficienti da mostrare.")
+        return
+
+    lines = []
+    for _, change, mid, question, yes_p, no_p, total_volume, trade_count, active, resolved in movers:
+        arrow = "🚀" if change > 0 else "📉" if change < 0 else "➖"
+        status = "🟢" if active else "⚪"
+        short_q = question if len(question) <= 72 else question[:69] + "..."
+        lines.append(
+            f"{status} **#{mid}** {arrow} **{signed_fmt(change)}** • YES **{yes_p}%** / NO **{no_p}%**\n"
+            f"{short_q}\n📦 Volume: **{total_volume}** • 🔁 Trade: **{trade_count}**"
+        )
+
+    embed = discord.Embed(
+        title="🚀 Top Movers",
+        description="\n\n".join(lines),
+        color=COLOR_ORANGE
+    )
+    embed.set_footer(text="v2.0.2 • Mercati con maggiore variazione del prezzo YES")
+    await ctx.send(embed=embed)
+
 
 # =========================
 # CHART
@@ -3059,7 +3406,7 @@ async def closemarket(ctx, market_id: int):
     """, (market_id,))
     conn.commit()
 
-    result_channel = bot.get_channel(RESULTS_CHANNEL_ID)
+    result_channel = await get_discord_channel_safe(RESULTS_CHANNEL_ID)
     embed = discord.Embed(
         title="🔒 Mercato chiuso manualmente",
         description=question,
@@ -3231,7 +3578,7 @@ async def resolve_market_command(ctx, market_id: int, result: str):
     result_embed.add_field(name="💰 Payout", value=f"Mercato #{market_id} risolto • {total_paid} crediti distribuiti", inline=False)
     result_embed.set_footer(text="Grazie per aver giocato!")
 
-    result_channel = bot.get_channel(RESULTS_CHANNEL_ID)
+    result_channel = await get_discord_channel_safe(RESULTS_CHANNEL_ID)
     if result_channel:
         await result_channel.send(embed=result_embed)
         await ctx.send(f"✅ Mercato #{market_id} risolto e pubblicato nel canale risultati.")
@@ -3697,6 +4044,114 @@ def request_json(url, headers=None, params=None, timeout=10):
         return None, {"error": str(e)}
 
 
+async def get_discord_channel_safe(channel_id):
+    """Recupera un canale anche quando non è ancora in cache."""
+    try:
+        channel = bot.get_channel(int(channel_id))
+        if channel:
+            return channel
+        return await bot.fetch_channel(int(channel_id))
+    except Exception as e:
+        print(f"[CHANNEL FETCH] Impossibile recuperare {channel_id}: {e}")
+        return None
+
+
+def sportmonks_get(path, params=None):
+    """Wrapper Sportmonks v2.0.1: non blocca il bot se il token manca o l'API risponde male."""
+    if not SPORTMONKS_API_TOKEN:
+        return None, {"error": "SPORTMONKS_API_TOKEN mancante"}
+
+    clean_path = str(path).lstrip("/")
+    url = f"{SPORTMONKS_BASE_URL.rstrip('/')}/{clean_path}"
+    final_params = dict(params or {})
+    final_params.setdefault("api_token", SPORTMONKS_API_TOKEN)
+
+    return request_json(url, params=final_params, timeout=12)
+
+
+# Filtro intelligente GNews/Gazzetta: calcio mondiale, non cronaca/politica.
+FOOTBALL_COMPETITION_KEYWORDS = [
+    "fifa", "world cup", "coppa del mondo", "mondiale", "mondiali", "uefa",
+    "champions league", "europa league", "conference league", "nations league",
+    "club world cup", "serie a", "serie b", "premier league", "la liga", "liga",
+    "bundesliga", "ligue 1", "eredivisie", "primeira liga", "mls", "brasileirao",
+    "copa libertadores", "libertadores", "copa sudamericana", "copa america", "afcon",
+    "asian cup", "euro", "european championship", "qualificazioni", "qualifiers"
+]
+
+FOOTBALL_TERMS = [
+    "calcio", "football", "soccer", "gol", "goal", "assist", "rigore", "penalty",
+    "var", "fuorigioco", "offside", "cartellino", "red card", "yellow card",
+    "espulsione", "ammonizione", "formazione", "formazioni", "lineup", "starting xi",
+    "sostituzione", "substitution", "infortunio", "injury", "squalifica", "suspension",
+    "allenatore", "coach", "manager", "ct", "stadio", "match", "partita", "derby",
+    "mercato", "calciomercato", "transfer", "signing", "prestito", "loan", "contratto",
+    "rinnovo", "club", "nazionale", "convocati", "rosa", "campionato", "coppa"
+]
+
+FOOTBALL_TEAM_KEYWORDS = [
+    "italia", "italy", "argentina", "brazil", "brasile", "francia", "france", "spagna", "spain",
+    "germany", "germania", "england", "inghilterra", "portugal", "portogallo", "netherlands",
+    "olanda", "belgium", "belgio", "croatia", "croazia", "morocco", "marocco", "japan", "giappone",
+    "usa", "united states", "mexico", "messico", "colombia", "uruguay", "ghana", "senegal",
+    "milan", "inter", "juventus", "roma", "lazio", "napoli", "atalanta", "fiorentina",
+    "torino", "bologna", "arsenal", "chelsea", "liverpool", "manchester united", "manchester city",
+    "tottenham", "real madrid", "barcelona", "atletico", "psg", "paris saint-germain", "bayern",
+    "borussia", "dortmund", "leverkusen", "benfica", "porto", "sporting", "ajax", "psv",
+    "feyenoord", "flamengo", "palmeiras", "boca", "river plate", "al hilal", "al nassr"
+]
+
+NEWS_BLACKLIST = [
+    "politica", "elezioni", "election", "parlamento", "parliament", "governo", "government",
+    "ministro", "minister", "presidente del consiglio", "partito", "war", "guerra", "terrorismo",
+    "omicidio", "murder", "polizia", "police", "tribunale", "court", "arresto", "arrested",
+    "cronaca", "economia", "finance", "borsa", "stock", "crypto", "bitcoin", "meteo", "weather",
+    "terremoto", "earthquake", "cinema", "movie", "tv", "reality", "celebrity", "gossip"
+]
+
+
+def _contains_keyword(text, keywords):
+    text = text.lower()
+    return [kw for kw in keywords if kw.lower() in text]
+
+
+def football_news_relevance(article):
+    """Restituisce (score, motivi). Pubblica solo notizie con score >= 3."""
+    title = article.get("title", "") or ""
+    desc = article.get("description", "") or ""
+    text = f"{title} {desc}".lower()
+
+    blacklist_hits = _contains_keyword(text, NEWS_BLACKLIST)
+    competition_hits = _contains_keyword(text, FOOTBALL_COMPETITION_KEYWORDS)
+    team_hits = _contains_keyword(text, FOOTBALL_TEAM_KEYWORDS)
+    term_hits = _contains_keyword(text, FOOTBALL_TERMS)
+
+    score = 0
+    score += min(6, len(competition_hits) * 3)
+    score += min(6, len(team_hits) * 2)
+    score += min(6, len(term_hits) * 1)
+    score -= len(blacklist_hits) * 5
+
+    reasons = []
+    if competition_hits:
+        reasons.append("competizioni: " + ", ".join(competition_hits[:3]))
+    if team_hits:
+        reasons.append("squadre/nazionali: " + ", ".join(team_hits[:3]))
+    if term_hits:
+        reasons.append("termini calcio: " + ", ".join(term_hits[:4]))
+    if blacklist_hits:
+        reasons.append("blacklist: " + ", ".join(blacklist_hits[:3]))
+
+    return score, "; ".join(reasons) if reasons else "nessun segnale forte"
+
+
+def is_relevant_football_news(article):
+    score, reason = football_news_relevance(article)
+    article["relevance_score"] = score
+    article["relevance_reason"] = reason
+    return score >= 3
+
+
 def is_news_already_seen(source, external_id):
     c.execute("SELECT 1 FROM news_seen WHERE source=? AND external_id=?", (source, str(external_id)))
     return c.fetchone() is not None
@@ -3714,16 +4169,22 @@ def mark_news_seen(source, external_id):
 
 
 def fetch_gnews_sports():
+    """GNews v2.0.1: ricerca larga ma filtro severo sul calcio mondiale."""
     if not GNEWS_API_KEY:
         return []
+
+    query = (
+        '("calcio" OR "football" OR "soccer" OR "Serie A" OR "Premier League" OR '
+        '"Champions League" OR "World Cup" OR "calciomercato" OR "transfer")'
+    )
 
     status, data = request_json(
         "https://gnews.io/api/v4/search",
         params={
-            "q": "calcio OR football OR sport",
+            "q": query,
             "lang": "it",
             "country": "it",
-            "max": 5,
+            "max": 10,
             "apikey": GNEWS_API_KEY
         }
     )
@@ -3737,16 +4198,22 @@ def fetch_gnews_sports():
         external_id = a.get("url") or a.get("title")
         if not external_id:
             continue
-        articles.append({
+        article = {
             "source": "GNews",
             "external_id": external_id,
-            "title": a.get("title", "Notizia sportiva"),
+            "title": a.get("title", "Notizia calcistica"),
             "description": a.get("description") or "",
             "url": a.get("url") or "",
             "published_at": a.get("publishedAt") or ""
-        })
+        }
+        if is_relevant_football_news(article):
+            articles.append(article)
+        else:
+            print(f"[GNEWS FILTER] Scartata: {article['title']} | score={article.get('relevance_score')} | {article.get('relevance_reason')}")
 
-    return articles
+    # pubblica prima le notizie più pertinenti
+    articles.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+    return articles[:5]
 
 
 def fetch_api_football_news():
@@ -3802,7 +4269,9 @@ async def post_news_article(channel, article):
         embed.add_field(name="Pubblicata", value=str(article["published_at"])[:80], inline=True)
     if article.get("url"):
         embed.add_field(name="Link", value=article["url"][:1024], inline=False)
-    embed.set_footer(text="Market Pulse • v2.0.0")
+    if article.get("relevance_score") is not None:
+        embed.add_field(name="Rilevanza calcio", value=f"{article.get('relevance_score')} punti", inline=True)
+    embed.set_footer(text="Gazzetta • filtro calcio mondiale v2.0.1")
 
     await channel.send(embed=embed)
 
@@ -3812,9 +4281,9 @@ async def market_pulse_news_loop():
 
     while not bot.is_closed():
         try:
-            channel = bot.get_channel(MARKET_PULSE_CHANNEL_ID)
+            channel = await get_discord_channel_safe(GAZZETTA_CHANNEL_ID)
             if not channel:
-                print(f"[MARKET PULSE] Canale {MARKET_PULSE_CHANNEL_ID} non trovato.")
+                print(f"[GAZZETTA] Canale {GAZZETTA_CHANNEL_ID} non trovato.")
             else:
                 articles = fetch_api_football_news() + fetch_gnews_sports()
 
@@ -3829,9 +4298,78 @@ async def market_pulse_news_loop():
                     await asyncio.sleep(2)
 
         except Exception as e:
-            print("[MARKET PULSE] Errore loop news:", e)
+            print("[GAZZETTA NEWS] Errore loop news:", e)
 
         await asyncio.sleep(NEWS_LOOP_MINUTES * 60)
+
+
+async def gazzetta_live_loop():
+    """Pubblica su #gazzetta gli eventi live Sportmonks: goal, cartellini, formazioni e sostituzioni."""
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            if not SPORTMONKS_API_TOKEN:
+                await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
+                continue
+
+            channel = await get_discord_channel_safe(GAZZETTA_CHANNEL_ID)
+            if not channel:
+                await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
+                continue
+
+            status, data = sportmonks_get(
+                "fixtures/live",
+                params={"include": "participants;scores;events.type;state;league"}
+            )
+
+            if status != 200:
+                print(f"[GAZZETTA LIVE] Sportmonks status {status}: {data}")
+                await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
+                continue
+
+            for fixture in data.get("data", []) or []:
+                home, away = sportmonks_fixture_teams(fixture)
+                score = sportmonks_fixture_score(fixture)
+                league = sportmonks_fixture_league(fixture)
+                fixture_id = fixture.get("id") or f"{home}-{away}"
+
+                for ev in fixture.get("events", []) or []:
+                    label = sportmonks_event_label(ev)
+                    # Pubblica solo eventi davvero utili per il canale Gazzetta.
+                    if label not in ["⚽ Goal", "🟥 Espulsione", "🟨 Ammonizione", "🔄 Sostituzione", "📋 Formazione"]:
+                        continue
+
+                    event_id = ev.get("id") or f"{fixture_id}-{ev.get('minute')}-{label}-{ev.get('player_name') or ev.get('participant_name')}"
+                    if is_news_already_seen("SportmonksLive", event_id):
+                        continue
+
+                    minute = ev.get("minute") or ev.get("time") or ""
+                    player = ev.get("player_name") or ""
+                    team = ev.get("participant_name") or ev.get("team_name") or ""
+
+                    embed = discord.Embed(
+                        title=f"{label} | {home} vs {away}",
+                        description=f"🏆 {league}\n📊 Risultato: **{score}**",
+                        color=COLOR_RED if "Espulsione" in label else COLOR_GREEN if "Goal" in label else COLOR_CYAN,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    if minute:
+                        embed.add_field(name="⏱️ Minuto", value=f"{minute}'", inline=True)
+                    if player:
+                        embed.add_field(name="👤 Giocatore", value=player, inline=True)
+                    if team:
+                        embed.add_field(name="🏟️ Squadra", value=team, inline=True)
+                    embed.set_footer(text="Gazzetta Live • Sportmonks v2.0.1")
+
+                    await channel.send(embed=embed)
+                    mark_news_seen("SportmonksLive", event_id)
+                    await asyncio.sleep(1)
+
+        except Exception as e:
+            print("[GAZZETTA LIVE] Errore loop:", e)
+
+        await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
 
 
 async def notify_personal_alert(user_id, embed, fallback_channel=None):
@@ -4061,9 +4599,6 @@ async def check_closing_alerts():
 # MARKET ALERTS
 # =========================
 async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last_alert_yes_price):
-    if not channel_id:
-        return
-
     yes_p, no_p = market_probabilities(yes, no)
 
     if last_alert_yes_price is None:
@@ -4076,10 +4611,13 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
     if abs(diff) < ALERT_THRESHOLD:
         return
 
-    try:
-        channel = bot.get_channel(int(channel_id))
-    except Exception:
-        channel = None
+    # v2.0.1: gli alert pubblici sulle quote vanno su #gazzetta.
+    channel = await get_discord_channel_safe(GAZZETTA_CHANNEL_ID)
+    if not channel and channel_id:
+        try:
+            channel = await get_discord_channel_safe(int(channel_id))
+        except Exception:
+            channel = None
 
     if not channel:
         return
@@ -4087,15 +4625,17 @@ async def maybe_send_market_alert(market_id, question, yes, no, channel_id, last
     direction = "📈" if diff > 0 else "📉"
 
     embed = discord.Embed(
-        title="🚨 Alert quota",
+        title="🔔 MARKET UPDATE | Alert quota",
         description=question,
-        color=COLOR_ORANGE
+        color=COLOR_ORANGE,
+        timestamp=datetime.now(timezone.utc)
     )
     embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
     embed.add_field(name="Variazione YES", value=f"{direction} {last_alert_yes_price:.1f}% → {yes_p:.1f}%", inline=False)
     embed.add_field(name="🔴 NO", value=f"{no_p:.1f}%", inline=True)
     embed.add_field(name="📊 Scostamento", value=f"{diff:+.1f}%", inline=True)
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
+    embed.set_footer(text="Gazzetta Market Update • v2.0.1")
 
     await channel.send(embed=embed)
 
@@ -4167,7 +4707,7 @@ async def resolver_loop():
 
                 print(f"[CLOSED] {mid} -> {final}")
 
-                result_channel = bot.get_channel(RESULTS_CHANNEL_ID)
+                result_channel = await get_discord_channel_safe(RESULTS_CHANNEL_ID)
                 if result_channel:
                     outcome_icon = "🟢 YES" if final == "YES" else "🔴 NO"
                     winner_text = res["home"] if winner == "HOME" else res["away"] if winner == "AWAY" else "Pareggio"
@@ -4267,6 +4807,7 @@ async def on_ready():
     bot.loop.create_task(badge_checker_loop())
     bot.loop.create_task(calendar_poster_loop())
     bot.loop.create_task(market_pulse_news_loop())
+    bot.loop.create_task(gazzetta_live_loop())
     bot.loop.create_task(personal_alert_checker_loop())
 
 
