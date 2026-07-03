@@ -2884,7 +2884,7 @@ async def live_football_data_fallback(ctx):
 
 
 def sportmonks_fixture_teams(fixture):
-    participants = fixture.get("participants") or []
+    participants = sportmonks_list_from_relation(fixture.get("participants"))
     home = "Casa"
     away = "Trasferta"
     for p in participants:
@@ -2903,12 +2903,15 @@ def sportmonks_fixture_teams(fixture):
 
 
 def sportmonks_fixture_score(fixture):
-    scores = fixture.get("scores") or []
+    scores = sportmonks_list_from_relation(fixture.get("scores"))
     home_score = away_score = None
     for s in scores:
         score_data = s.get("score") or {}
         goals = score_data.get("goals")
         participant = str(s.get("description") or s.get("participant") or "").lower()
+        if "current" not in str(s.get("type") or s.get("type_id") or s.get("description") or "current").lower() and len(scores) > 2:
+            # Se Sportmonks restituisce più score storici, preferiamo comunque quelli descritti home/away.
+            pass
         if "home" in participant:
             home_score = goals
         elif "away" in participant:
@@ -2938,142 +2941,66 @@ def sportmonks_fixture_state(fixture):
 def sportmonks_fixture_league(fixture):
     league = fixture.get("league") or {}
     if isinstance(league, dict):
+        if isinstance(league.get("data"), dict):
+            return league["data"].get("name") or "Competizione"
         return league.get("name") or "Competizione"
     return "Competizione"
 
 
-def sportmonks_event_type_name(event):
-    """Estrae il nome del tipo evento Sportmonks in modo flessibile.
-
-    Sportmonks può restituire eventi con campi diversi a seconda di endpoint,
-    include e piano API. Questa funzione evita che il loop Gazzetta Live
-    ignori eventi reali solo perché il tipo non si trova esattamente in
-    event["type"]["name"].
-    """
-    if not isinstance(event, dict):
-        return ""
-
-    parts = []
-    type_data = event.get("type")
-    if isinstance(type_data, dict):
-        parts.extend([
-            type_data.get("name"),
-            type_data.get("code"),
-            type_data.get("developer_name"),
-            type_data.get("model_type"),
-        ])
-    elif type_data:
-        parts.append(type_data)
-
-    parts.extend([
-        event.get("type_name"),
-        event.get("type_code"),
-        event.get("event_type"),
-        event.get("event"),
-        event.get("name"),
-        event.get("result"),
-        event.get("description"),
-        event.get("addition"),
-        event.get("type_id"),
-    ])
-
-    return " ".join(str(p).lower() for p in parts if p is not None)
-
-
 def sportmonks_event_label(event):
-    type_name = sportmonks_event_type_name(event)
+    type_data = event.get("type") or {}
+    type_name = ""
+    if isinstance(type_data, dict):
+        if isinstance(type_data.get("data"), dict):
+            type_data = type_data["data"]
+        type_name = (type_data.get("name") or type_data.get("code") or type_data.get("developer_name") or "").lower()
+    type_name = type_name or str(event.get("type") or event.get("type_id") or event.get("event_type") or "").lower()
+    result_info = str(event.get("result_info") or event.get("addition") or "").lower()
+    text = f"{type_name} {result_info}"
 
-    if any(k in type_name for k in ["goal", "scored", "penalty scored", "own goal"]):
+    if "goal" in text or "penalty scored" in text:
         return "⚽ Goal"
-    if any(k in type_name for k in ["red", "redcard", "red card", "second yellow"]):
+    if "red" in text:
         return "🟥 Espulsione"
-    if any(k in type_name for k in ["yellow", "yellowcard", "yellow card"]):
+    if "yellow" in text:
         return "🟨 Ammonizione"
-    if any(k in type_name for k in ["substitution", "substitute", "subst", "substitution in", "substitution out"]):
+    if "substitution" in text or "subst" in text:
         return "🔄 Sostituzione"
-    if any(k in type_name for k in ["lineup", "formation", "starting xi", "bench"]):
+    if "lineup" in text or "formation" in text:
         return "📋 Formazione"
+    if "var" in text:
+        return "📺 VAR"
     return "🟢 INFO"
 
 
 def sportmonks_event_minute(event):
-    if not isinstance(event, dict):
-        return ""
-    minute = (
-        event.get("minute")
-        or event.get("current_minute")
-        or event.get("time")
-        or event.get("sort_order")
-    )
-    extra = event.get("extra_minute") or event.get("added_time") or event.get("injury_time")
+    minute = event.get("minute") or event.get("time") or event.get("period_minute")
+    extra = event.get("extra_minute") or event.get("injury_time")
     if minute and extra:
         return f"{minute}+{extra}"
-    return str(minute) if minute is not None and minute != "" else ""
+    return str(minute or "")
 
 
 def sportmonks_event_player(event):
-    if not isinstance(event, dict):
-        return ""
-    for key in ["player", "participant", "related_player", "assist", "coach"]:
+    for key in ["player", "participant", "related_player"]:
         value = event.get(key)
         if isinstance(value, dict):
-            name = value.get("name") or value.get("display_name") or value.get("common_name")
-            if name:
-                return str(name)
-    return str(event.get("player_name") or event.get("participant_name") or event.get("related_player_name") or "")
+            if isinstance(value.get("data"), dict):
+                return value["data"].get("name") or value["data"].get("display_name") or ""
+            return value.get("name") or value.get("display_name") or ""
+    return event.get("player_name") or event.get("player") or ""
 
 
-def sportmonks_event_team(event):
-    if not isinstance(event, dict):
-        return ""
-    for key in ["team", "participant"]:
-        value = event.get(key)
-        if isinstance(value, dict):
-            name = value.get("name") or value.get("short_code")
-            if name:
-                return str(name)
-    return str(event.get("team_name") or event.get("participant_name") or "")
-
-
-def sportmonks_fixture_events(fixture):
-    """Restituisce la lista eventi live cercandola in più possibili campi Sportmonks."""
-    if not isinstance(fixture, dict):
-        return []
-
-    candidates = []
-    for key in ["events", "timeline", "incidents", "comments", "periods"]:
-        value = fixture.get(key)
-        if isinstance(value, list):
-            candidates.extend(value)
-        elif isinstance(value, dict):
-            nested = value.get("data") or value.get("events")
-            if isinstance(nested, list):
-                candidates.extend(nested)
-
-    # Alcune risposte includono relazioni dentro data: { events: { data: [...] } }.
-    data = fixture.get("data")
-    if isinstance(data, dict):
-        for key in ["events", "timeline", "incidents"]:
-            value = data.get(key)
-            if isinstance(value, list):
-                candidates.extend(value)
-            elif isinstance(value, dict) and isinstance(value.get("data"), list):
-                candidates.extend(value.get("data"))
-
-    # Deduplica leggera senza perdere eventi privi di id.
-    seen = set()
-    events = []
-    for ev in candidates:
-        if not isinstance(ev, dict):
-            continue
-        key = ev.get("id") or (sportmonks_event_minute(ev), sportmonks_event_type_name(ev), sportmonks_event_player(ev), sportmonks_event_team(ev))
-        key = str(key)
-        if key in seen:
-            continue
-        seen.add(key)
-        events.append(ev)
-
-    return events
+def sportmonks_event_team(event, fixture=None):
+    team = event.get("participant_name") or event.get("team_name") or ""
+    if team:
+        return team
+    participant_id = event.get("participant_id") or event.get("team_id")
+    if fixture and participant_id:
+        for p in sportmonks_list_from_relation(fixture.get("participants")):
+            if str(p.get("id")) == str(participant_id):
+                return p.get("name") or ""
+    return ""
 
 
 def sportmonks_fixture_events_summary(fixture):
@@ -3085,7 +3012,7 @@ def sportmonks_fixture_events_summary(fixture):
     for ev in events[-5:]:
         minute = sportmonks_event_minute(ev)
         player = sportmonks_event_player(ev)
-        team = sportmonks_event_team(ev)
+        team = sportmonks_event_team(ev, fixture)
         label = sportmonks_event_label(ev)
         prefix = f"{minute}' " if minute else ""
         body = player or team or "Evento live"
@@ -4945,31 +4872,62 @@ def safe_int(value):
         return None
 
 
+SPORTMONKS_LIVE_PATH = "livescores/inplay"
+SPORTMONKS_LIVE_INCLUDE = "participants;events.type;scores;state;league;periods;timeline.type"
+
+
+def sportmonks_get_debug(path, params=None):
+    """Richiama Sportmonks e restituisce anche URL/parametri diagnostici senza esporre il token."""
+    clean_path = str(path).lstrip("/")
+    url = f"{SPORTMONKS_BASE_URL.rstrip('/')}/{clean_path}"
+    final_params = dict(params or {})
+    safe_params = dict(final_params)
+    status, data = sportmonks_get(clean_path, params=final_params)
+    safe_params.pop("api_token", None)
+    return status, data, url, safe_params
+
+
 def sportmonks_live_payload():
-    """Recupera le partite live evitando l'errore 422 fixtureId non intero."""
-    # Include più ricco: alcune installazioni Sportmonks espongono gli eventi solo
-    # se vengono incluse anche relazioni player/participant. Se un include non è
-    # supportato dal piano, proviamo fallback progressivi.
-    includes = [
-        "participants;scores;events.type;events.player;events.participant;state;league",
-        "participants;scores;events.type;state;league",
-        "participants;scores;state;league",
-    ]
+    """Recupera le partite live dall'endpoint ufficiale Sportmonks Football API v3.
 
-    endpoints = ["fixtures/live", "livescores/inplay"]
-    last_status, last_data = None, {}
+    La documentazione indica /v3/football/livescores/inplay.
+    Usiamo direttamente questo endpoint invece di fixtures/live, che su alcuni account
+    può generare 422 o richiedere parametri diversi.
+    """
+    return sportmonks_get(
+        SPORTMONKS_LIVE_PATH,
+        params={"include": SPORTMONKS_LIVE_INCLUDE}
+    )
 
-    for endpoint in endpoints:
-        for include in includes:
-            status, data = sportmonks_get(endpoint, params={"include": include})
-            last_status, last_data = status, data
-            if status == 200:
-                return status, data
-            # 422 su fixtureId/include: passa al fallback successivo senza bloccare il bot.
-            if status not in [400, 401, 403, 404, 422]:
-                break
 
-    return last_status, last_data
+def sportmonks_list_from_relation(value):
+    """Normalizza relazioni Sportmonks che possono essere liste o dict con chiave data."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        data = value.get("data")
+        if isinstance(data, list):
+            return data
+    return []
+
+
+def sportmonks_fixture_events(fixture):
+    """Estrae eventi live da più campi possibili della risposta v3."""
+    events = []
+    for key in ["events", "timeline"]:
+        events.extend(sportmonks_list_from_relation(fixture.get(key)))
+    # rimuove duplicati mantenendo ordine
+    seen = set()
+    unique = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        ev_id = ev.get("id") or f"{ev.get('minute')}-{ev.get('type_id')}-{ev.get('player_name')}-{ev.get('participant_id')}"
+        if ev_id in seen:
+            continue
+        seen.add(ev_id)
+        unique.append(ev)
+    return unique
 
 
 # Filtro intelligente GNews/Gazzetta: calcio mondiale, non cronaca/politica.
@@ -5206,62 +5164,8 @@ async def market_pulse_news_loop():
         await asyncio.sleep(NEWS_LOOP_MINUTES * 60)
 
 
-@bot.command(name="testgazzetta")
-@admin_only()
-async def testgazzetta(ctx):
-    """Diagnostica admin per Gazzetta Live/Sportmonks."""
-    if not SPORTMONKS_API_TOKEN:
-        await ctx.send("❌ SPORTMONKS_API_TOKEN mancante nelle variabili Railway.")
-        return
-
-    status, data = sportmonks_live_payload()
-    fixtures = data.get("data", []) if isinstance(data, dict) else []
-
-    embed = discord.Embed(
-        title="🧪 Test Gazzetta Live / Sportmonks",
-        color=COLOR_CYAN,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.add_field(name="📡 Status", value=str(status), inline=True)
-    embed.add_field(name="🔴 Partite live trovate", value=str(len(fixtures or [])), inline=True)
-    embed.add_field(name="📺 Canale Gazzetta", value=f"<#{GAZZETTA_CHANNEL_ID}>", inline=True)
-
-    if status != 200:
-        embed.add_field(name="Errore API", value=str(data)[:1000], inline=False)
-        await ctx.send(embed=embed)
-        return
-
-    if not fixtures:
-        embed.add_field(name="Risultato", value="Nessuna partita live restituita da Sportmonks in questo momento.", inline=False)
-        await ctx.send(embed=embed)
-        return
-
-    for fixture in fixtures[:5]:
-        home, away = sportmonks_fixture_teams(fixture)
-        score = sportmonks_fixture_score(fixture)
-        league = sportmonks_fixture_league(fixture)
-        minute = sportmonks_fixture_minute(fixture)
-        events = sportmonks_fixture_events(fixture)
-        labels = []
-        for ev in events[:6]:
-            labels.append(sportmonks_event_label(ev))
-        labels_text = ", ".join(labels) if labels else "Nessun evento letto dal parser"
-        embed.add_field(
-            name=f"{home} vs {away}",
-            value=(
-                f"🏆 {league}\n"
-                f"⏱️ {minute} | 📊 {score}\n"
-                f"Eventi letti: **{len(events)}**\n"
-                f"Tipi: {labels_text[:400]}"
-            ),
-            inline=False
-        )
-
-    await ctx.send(embed=embed)
-
-
 async def gazzetta_live_loop():
-    """Pubblica su #gazzetta eventi Sportmonks e segnala anche partite live iniziate."""
+    """Pubblica su #gazzetta gli eventi live Sportmonks: goal, cartellini, formazioni e sostituzioni."""
     await bot.wait_until_ready()
 
     while not bot.is_closed():
@@ -5282,50 +5186,42 @@ async def gazzetta_live_loop():
                 await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
                 continue
 
-            fixtures = data.get("data", []) if isinstance(data, dict) else []
-            print(f"[GAZZETTA LIVE] Fixture live trovate: {len(fixtures or [])}")
-
-            for fixture in fixtures or []:
+            for fixture in data.get("data", []) or []:
                 home, away = sportmonks_fixture_teams(fixture)
                 score = sportmonks_fixture_score(fixture)
                 league = sportmonks_fixture_league(fixture)
-                minute = sportmonks_fixture_minute(fixture)
-                state = sportmonks_fixture_state(fixture)
                 fixture_id = safe_int(fixture.get("id"))
-
                 if fixture_id is None:
-                    print(f"[GAZZETTA LIVE] Fixture saltata: id non valido {fixture.get('id')}")
+                    # Fix Gazzetta Live/Sportmonks: niente richieste/eventi con fixtureId vuoto o non numerico.
                     continue
 
-                # Pubblica almeno un avviso partita live, anche se l'API non espone eventi.
-                live_seen_id = f"fixture-live-{fixture_id}"
-                if not is_news_already_seen("SportmonksLive", live_seen_id):
-                    embed = discord.Embed(
-                        title=f"🔴 Live | {home} vs {away}",
-                        description=f"🏆 {league}\n📊 Risultato: **{score}**\n📡 Stato: **{state}**",
-                        color=COLOR_RED,
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                    if minute != "N/D":
-                        embed.add_field(name="⏱️ Minuto", value=minute, inline=True)
-                    embed.set_footer(text="Gazzetta Live • Sportmonks")
-                    await channel.send(embed=embed)
-                    mark_news_seen("SportmonksLive", live_seen_id)
-                    await asyncio.sleep(1)
-
                 events = sportmonks_fixture_events(fixture)
-                print(f"[GAZZETTA LIVE] {fixture_id} {home} vs {away}: eventi letti {len(events)}")
+                if not events:
+                    live_id = f"live-start-{fixture_id}"
+                    if not is_news_already_seen("SportmonksLive", live_id):
+                        minute = sportmonks_fixture_minute(fixture)
+                        embed = discord.Embed(
+                            title=f"🔴 Live | {home} vs {away}",
+                            description=f"🏆 {league}\n📊 Risultato: **{score}**\n⏱️ Minuto: **{minute}**",
+                            color=COLOR_RED,
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        embed.set_footer(text="Gazzetta Live • Sportmonks v3")
+                        await channel.send(embed=embed)
+                        mark_news_seen("SportmonksLive", live_id)
+                        await asyncio.sleep(1)
+                    continue
 
                 for ev in events:
                     label = sportmonks_event_label(ev)
                     # Pubblica solo eventi davvero utili per il canale Gazzetta.
-                    if label not in ["⚽ Goal", "🟥 Espulsione", "🟨 Ammonizione", "🔄 Sostituzione", "📋 Formazione"]:
+                    if label not in ["⚽ Goal", "🟥 Espulsione", "🟨 Ammonizione", "🔄 Sostituzione", "📋 Formazione", "📺 VAR"]:
                         continue
 
-                    minute_ev = sportmonks_event_minute(ev)
+                    minute = sportmonks_event_minute(ev)
                     player = sportmonks_event_player(ev)
-                    team = sportmonks_event_team(ev)
-                    event_id = ev.get("id") or f"{fixture_id}-{minute_ev}-{label}-{player}-{team}"
+                    team = sportmonks_event_team(ev, fixture)
+                    event_id = ev.get("id") or f"{fixture_id}-{minute}-{label}-{player or team}"
                     if is_news_already_seen("SportmonksLive", event_id):
                         continue
 
@@ -5335,13 +5231,13 @@ async def gazzetta_live_loop():
                         color=COLOR_RED if "Espulsione" in label else COLOR_GREEN if "Goal" in label else COLOR_CYAN,
                         timestamp=datetime.now(timezone.utc)
                     )
-                    if minute_ev:
-                        embed.add_field(name="⏱️ Minuto", value=f"{minute_ev}'", inline=True)
+                    if minute:
+                        embed.add_field(name="⏱️ Minuto", value=f"{minute}'", inline=True)
                     if player:
-                        embed.add_field(name="👤 Giocatore", value=player, inline=True)
+                        embed.add_field(name="👤 Giocatore", value=str(player)[:250], inline=True)
                     if team:
-                        embed.add_field(name="🏟️ Squadra", value=team, inline=True)
-                    embed.set_footer(text="Gazzetta Live • Sportmonks")
+                        embed.add_field(name="🏟️ Squadra", value=str(team)[:250], inline=True)
+                    embed.set_footer(text="Gazzetta Live • Sportmonks v3")
 
                     await channel.send(embed=embed)
                     mark_news_seen("SportmonksLive", event_id)
@@ -5351,6 +5247,84 @@ async def gazzetta_live_loop():
             print("[GAZZETTA LIVE] Errore loop:", e)
 
         await asyncio.sleep(GAZZETTA_LIVE_LOOP_SECONDS)
+
+
+@bot.command(name="testgazzetta")
+@admin_only()
+async def testgazzetta(ctx):
+    """Diagnostica admin per Gazzetta Live / Sportmonks.
+
+    Mostra status HTTP, endpoint usato, numero di partite live e presenza eventi.
+    Non espone mai il token API.
+    """
+    await delete_admin_command_message(ctx)
+
+    if not SPORTMONKS_API_TOKEN:
+        await ctx.send("❌ SPORTMONKS_API_TOKEN mancante nelle variabili Railway.")
+        return
+
+    status, data, url, params = sportmonks_get_debug(
+        SPORTMONKS_LIVE_PATH,
+        params={"include": SPORTMONKS_LIVE_INCLUDE}
+    )
+
+    fixtures = []
+    if isinstance(data, dict):
+        fixtures = data.get("data") or []
+    if not isinstance(fixtures, list):
+        fixtures = []
+
+    embed = discord.Embed(
+        title="🧪 Test Gazzetta Live / Sportmonks",
+        color=COLOR_CYAN if status == 200 else COLOR_RED,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="Status HTTP", value=str(status), inline=True)
+    embed.add_field(name="Partite live trovate", value=str(len(fixtures)), inline=True)
+    embed.add_field(name="Endpoint", value=f"`{url.replace(SPORTMONKS_API_TOKEN, '[TOKEN]')}`", inline=False)
+    embed.add_field(name="Include", value=f"`{params.get('include', '')}`", inline=False)
+
+    if status != 200:
+        raw = str(data)[:900] if data else "Nessuna risposta JSON"
+        embed.add_field(name="Risposta API", value=f"```{raw}```", inline=False)
+        embed.set_footer(text="Se vedi 401/403/subscription required, il problema è token/piano Sportmonks.")
+        await ctx.send(embed=embed)
+        return
+
+    if not fixtures:
+        raw = str(data)[:900] if data else "data vuoto"
+        embed.add_field(
+            name="Nessuna partita live",
+            value=(
+                "L'endpoint ha risposto 200, ma `data` è vuoto. "
+                "Se ci sono partite live, controlla che il tuo piano Sportmonks includa Livescores/Inplay."
+            ),
+            inline=False
+        )
+        embed.add_field(name="Estratto risposta", value=f"```{raw}```", inline=False)
+        await ctx.send(embed=embed)
+        return
+
+    lines = []
+    total_events = 0
+    for fixture in fixtures[:8]:
+        home, away = sportmonks_fixture_teams(fixture)
+        score = sportmonks_fixture_score(fixture)
+        minute = sportmonks_fixture_minute(fixture)
+        state = sportmonks_fixture_state(fixture)
+        league = sportmonks_fixture_league(fixture)
+        events = sportmonks_fixture_events(fixture)
+        total_events += len(events)
+        lines.append(
+            f"**{home} vs {away}**\n"
+            f"{league} | {state} | {minute} | {score}\n"
+            f"Eventi letti: **{len(events)}**"
+        )
+
+    embed.add_field(name="Eventi totali letti", value=str(total_events), inline=True)
+    embed.add_field(name="Partite", value="\n\n".join(lines)[:1024], inline=False)
+    embed.set_footer(text="Test diretto dell'endpoint /livescores/inplay usato dal bot")
+    await ctx.send(embed=embed)
 
 
 async def notify_personal_alert(user_id, embed, fallback_channel=None):
