@@ -499,6 +499,7 @@ CREATE TABLE IF NOT EXISTS news_seen (
 for statement in [
     "ALTER TABLE trades ADD COLUMN price REAL",
     "ALTER TABLE trades ADD COLUMN closed INTEGER DEFAULT 0",
+    "ALTER TABLE trades ADD COLUMN buy_count INTEGER DEFAULT 1",
     "ALTER TABLE markets ADD COLUMN channel_id TEXT",
     "ALTER TABLE markets ADD COLUMN alert_yes_price REAL",
     "ALTER TABLE markets ADD COLUMN event_category TEXT",
@@ -548,9 +549,15 @@ def save_price(market_id, yes_price):
 # PORTFOLIO HELPERS
 # =========================
 def get_open_positions(user_id):
+    """Restituisce posizioni aperte aggregate per utente, mercato e lato.
+
+    In questo modo più acquisti successivi sullo stesso mercato/lato vengono
+    mostrati come una sola quota cumulativa, con prezzo medio ponderato.
+    Esempio: 50 YES + 50 YES = una posizione YES da 100; 20 NO resta separata.
+    """
     c.execute("""
         SELECT
-            t.id,
+            MIN(t.id) AS id,
             t.market_id,
             m.question,
             m.yes_pool,
@@ -561,14 +568,18 @@ def get_open_positions(user_id):
             m.result,
             m.match_key,
             t.side,
-            t.amount,
-            t.price
+            SUM(t.amount) AS amount,
+            CASE
+                WHEN SUM(t.amount) > 0 THEN SUM(t.amount * COALESCE(t.price, 50)) / SUM(t.amount)
+                ELSE 50
+            END AS price
         FROM trades t
         JOIN markets m ON t.market_id=m.id
         WHERE t.user_id=?
           AND t.amount > 0
           AND (t.closed IS NULL OR t.closed=0)
-        ORDER BY t.market_id DESC, t.id ASC
+        GROUP BY t.market_id, t.side
+        ORDER BY t.market_id DESC, MIN(t.id) ASC
     """, (user_id,))
 
     return c.fetchall()
@@ -2373,6 +2384,7 @@ async def portfolio(ctx):
         position_lines.append(
             f"**Mercato {market_id}** | {emoji} **{side}** | {status}\n"
             f"❓ {short_question}\n"
+            f"📦 Quota cumulativa: **{amount}** crediti\n"
             f"💸 Investito: **{invested:.0f}** | 📈 Valore: **{current_value:.0f}** | 💰 Vincita: **{possible_win:.0f}**\n"
             f"🎯 Prezzo medio: **{entry_price:.1f}%** | 📍 Prezzo attuale: **{current_price:.1f}%**\n"
             f"📊 P/L non realizzato: **{profit:+.0f}** ({profit_pct:+.1f}%)"
@@ -2877,7 +2889,7 @@ async def buy(ctx, market_id: int, side: str, amount: int):
         return
 
     c.execute("""
-        SELECT COUNT(*)
+        SELECT COALESCE(SUM(COALESCE(buy_count, 1)), 0)
         FROM trades
         WHERE user_id=?
           AND market_id=?
@@ -2923,10 +2935,41 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     yes_p, no_p = market_probabilities(yes, no)
     trade_price = yes_p if side == "YES" else no_p
 
+    # Posizioni cumulative: se l'utente ha già una posizione aperta sullo
+    # stesso mercato/lato, aggiorniamo quella riga invece di crearne una nuova.
+    # Il prezzo viene ricalcolato come media ponderata.
     c.execute("""
-        INSERT INTO trades (user_id, market_id, side, amount, price, closed)
-        VALUES (?, ?, ?, ?, ?, 0)
-    """, (user_id, market_id, side, amount, trade_price))
+        SELECT id, amount, price, COALESCE(buy_count, 1)
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+          AND side=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+        ORDER BY id ASC
+        LIMIT 1
+    """, (user_id, market_id, side))
+    existing_position = c.fetchone()
+
+    if existing_position:
+        trade_id, old_amount, old_price, old_buy_count = existing_position
+        old_amount = old_amount or 0
+        old_price = safe_entry_price(old_price, trade_price)
+        new_amount = old_amount + amount
+        new_avg_price = ((old_amount * old_price) + (amount * trade_price)) / new_amount
+
+        c.execute("""
+            UPDATE trades
+            SET amount=?,
+                price=?,
+                buy_count=?
+            WHERE id=?
+        """, (new_amount, new_avg_price, (old_buy_count or 1) + 1, trade_id))
+    else:
+        c.execute("""
+            INSERT INTO trades (user_id, market_id, side, amount, price, closed, buy_count)
+            VALUES (?, ?, ?, ?, ?, 0, 1)
+        """, (user_id, market_id, side, amount, trade_price))
 
     save_price(market_id, yes_p)
     award_xp(user_id, max(5, amount // 20))
@@ -2945,6 +2988,22 @@ async def buy(ctx, market_id: int, side: str, amount: int):
     embed.add_field(name="🔴 NO", value=f"{no_p}%", inline=True)
     volume_stats = get_market_volume_stats(market_id)
     embed.add_field(name="📦 Volume mercato", value=f"{volume_stats['total_volume']} crediti", inline=True)
+    c.execute("""
+        SELECT SUM(amount),
+               CASE
+                   WHEN SUM(amount) > 0 THEN SUM(amount * COALESCE(price, 50)) / SUM(amount)
+                   ELSE ?
+               END
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+          AND side=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+    """, (trade_price, user_id, market_id, side))
+    cumulative_amount, avg_price = c.fetchone()
+    embed.add_field(name="📦 Quota cumulativa", value=f"{int(cumulative_amount or amount)} crediti", inline=True)
+    embed.add_field(name="🎯 Prezzo medio", value=f"{float(avg_price or trade_price):.1f}%", inline=True)
     embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
 
     await ctx.send(embed=embed)
