@@ -2970,32 +2970,9 @@ async def profile(ctx):
         "rank": rank,
     }
 
-    # v2.0.2: Profile Card PNG. Se l'ambiente non ha Pillow o Discord non riesce
-    # a scaricare l'avatar, il comando torna automaticamente al vecchio embed.
-    try:
-        card_buffer, theme_id = await make_profile_card_png(
-            ctx.author,
-            metrics,
-            trader_level,
-            xp_current,
-            xp_required,
-            badge_ids=badge_ids,
-        )
-        file = discord.File(card_buffer, filename=f"profile_card_{ctx.author.id}.png")
-        embed = discord.Embed(
-            title=f"👤 Profilo di {ctx.author.display_name}",
-            description="Profile Card grafica v2.0.2",
-            color=COLOR_BLUE,
-        )
-        embed.set_image(url=f"attachment://profile_card_{ctx.author.id}.png")
-        embed.add_field(name="🎨 Tema card", value=theme_id.replace("theme_", "").replace("_", " ").title(), inline=True)
-        embed.add_field(name="⭐ Livello server", value=server_level, inline=True)
-        embed.add_field(name="💹 Livello trader", value=trader_level, inline=True)
-        apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo • Card PNG v2.0.2")
-        await ctx.send(embed=embed, file=file)
-        return
-    except Exception as e:
-        print(f"[PROFILE CARD] Fallback embed per {user_id}: {e}")
+    # v2.0.3: card PNG temporaneamente disattivata.
+    # Il profilo torna a usare solo embed Discord; Marketplace/cosmetici restano
+    # disponibili per futura integrazione grafica senza generare immagini PNG.
 
     color = COLOR_BLUE
     profit_emoji = "🟢" if open_profit >= 0 else "🔴"
