@@ -5593,3 +5593,28 @@ async def on_ready():
 # RUN
 # =========================
 bot.run(token)
+
+
+# ==========================================================
+# V2.0.2 ROADMAP UPDATE - PROFILE CARD PNG & MARKETPLACE
+# ==========================================================
+# Nuove specifiche implementative da sviluppare:
+#
+# - Sostituire il focus delle vecchie cornici con una Profile Card PNG.
+# - Ogni utente possiede una card Standard gratuita.
+# - I temi acquistati nello Shop modificano completamente la grafica della card.
+# - Gli oggetti collezionabili devono comparire sia sulla card PNG sia negli embed.
+# - Gli embed (!profile, !portfolio, !leaderboard, ecc.) devono adattarsi
+#   automaticamente al tema equipaggiato.
+# - Marketplace riorganizzato in:
+#       * Temi
+#       * Collezionabili
+#       * Bundle
+#       * Casse
+#       * Oggetti limitati
+# - Tutti gli acquisti restano esclusivamente cosmetici.
+# - Riesaminare e verificare il corretto funzionamento di:
+#       shop, inventario, equipaggiamento, bundle, casse,
+#       categorie, admin shop e relative interazioni.
+# ==========================================================
+
