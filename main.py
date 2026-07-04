@@ -100,8 +100,6 @@ API_FOOTBALL_HOST = os.environ.get("API_FOOTBALL_HOST", "v3.football.api-sports.
 API_FOOTBALL_NEWS_URL = os.environ.get("API_FOOTBALL_NEWS_URL")
 NEWS_LOOP_MINUTES = 30
 
-GITHUB_BANNERS_BASE_URL = "https://raw.githubusercontent.com/edoardominelli04-droid/discord-market-bot/main/assets/banners/"
-
 # Canale dedicato al registro delle attività admin.
 ACTIVITY_LOG_CHANNEL_ID = 1522190483713953813
 
@@ -5128,7 +5126,7 @@ class CreateItemModal(discord.ui.Modal, title="➕ Crea nuovo oggetto"):
             description = extra_value or "Frase profilo mostrata sotto il Titolo."
         elif self.category == "decorative":
             emoji_value = emoji_value or "🖼️"
-            image_url = GITHUB_BANNERS_BASE_URL + extra_value.strip()
+            image_url = extra_value
             description = "Immagine decorativa per il profilo."
             if not image_url.startswith(("http://", "https://")):
                 await interaction.response.send_message("❌ Devi inserire un URL immagine valido.", ephemeral=True)
