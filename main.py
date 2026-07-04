@@ -2709,7 +2709,6 @@ async def profile(ctx):
     if len(badge_text) > 1024:
         badge_text = badge_text[:1000] + "..."
     embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
-    embed.add_field(name="🎨 Marketplace", value=get_equipped_items_text(user_id), inline=False)
 
     apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo")
 
@@ -2747,6 +2746,1954 @@ async def leaderboard(ctx):
 
     for i, (user_id, balance, open_value, net_worth) in enumerate(ranking[:10], start=1):
         medal = medals[i - 1] if i <= 3 else f"#{i}"
+        equipped = get_equipped_items(user_id)
+        title_item = SHOP_ITEMS.get(equipped.get("title")) if equipped.get("title") else None
+        showcase_item = SHOP_ITEMS.get(equipped.get("showcase")) if equipped.get("showcase") else None
+        cosmetic_line = ""
+        if title_item:
+            cosmetic_line += f"\n🎖️ {title_item.get('emoji', '🎛️')} {title_item.get('name', item_id)}"
+        if showcase_item:
+            cosmetic_line += f"\n🎨 {showcase_item.get('emoji', '🎛️')} {showcase_item.get('name', item_id)}"
+        embed.add_field(
+            name=f"{medal} Posizione {i}",
+            value=(
+                f"👤 <@{user_id}>{cosmetic_line}\n"
+                f"💼 Patrimonio: **{net_worth:.0f}**\n"
+                f"💰 Saldo: {balance}\n"
+                f"📈 Posizioni aperte: {open_value:.0f}"
+            ),
+            inline=False
+        )
+
+    embed.set_footer(text="Comando disponibile anche come !classifica")
+    await ctx.send(embed=embed)
+
+# =========================
+# LIVE / ESPN SCOREBOARD
+# =========================
+ESPN_SOCCER_LEAGUES = {
+    # Stessi tornei principali previsti da football-data.org, dove ESPN espone lo scoreboard pubblico.
+    "fifa.world": "FIFA World Cup",              # WC
+    "uefa.champions": "Champions League",       # CL
+    "ger.1": "Bundesliga",                      # BL1
+    "ned.1": "Eredivisie",                      # DED
+    "bra.1": "Brasileirão Série A",             # BSA
+    "esp.1": "La Liga",                         # PD
+    "fra.1": "Ligue 1",                         # FL1
+    "eng.2": "Championship",                    # ELC
+    "por.1": "Primeira Liga",                   # PPL
+    "uefa.euro": "European Championship",       # EC
+    "ita.1": "Serie A",                         # SA
+    "eng.1": "Premier League",                  # PL
+    "uefa.europa": "Europa League",
+    "uefa.europa.conf": "Conference League",
+}
+
+ESPN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; CalcyscordBot/2.0; +https://discord.com)",
+    "Accept": "application/json,text/plain,*/*",
+}
+
+
+def espn_scoreboard_url(league_code):
+    return f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard"
+
+
+def fetch_espn_scoreboard(league_code):
+    return request_json(espn_scoreboard_url(league_code), headers=ESPN_HEADERS, timeout=12)
+
+
+def espn_competitors(event):
+    comps = event.get("competitions") or []
+    comp = comps[0] if comps else {}
+    competitors = comp.get("competitors") or []
+    home = {"id": None, "name": "Casa", "score": "-"}
+    away = {"id": None, "name": "Trasferta", "score": "-"}
+
+    for team_data in competitors:
+        team = team_data.get("team") or {}
+        item = {
+            "id": str(team.get("id") or team_data.get("id") or ""),
+            "name": team.get("displayName") or team.get("shortDisplayName") or team.get("name") or "Squadra",
+            "score": team_data.get("score", "-"),
+        }
+        if team_data.get("homeAway") == "home":
+            home = item
+        elif team_data.get("homeAway") == "away":
+            away = item
+
+    return home, away
+
+
+def espn_event_venue(event):
+    comps = event.get("competitions") or []
+    comp = comps[0] if comps else {}
+    venue = comp.get("venue") or event.get("venue") or {}
+    if not isinstance(venue, dict):
+        return ""
+
+    name = venue.get("fullName") or venue.get("name") or ""
+    address = venue.get("address") or {}
+    city = address.get("city") if isinstance(address, dict) else ""
+
+    if name and city:
+        return f"{name}, {city}"
+    return name or city or ""
+
+
+def _espn_detail_text(detail):
+    """Testo grezzo di un evento ESPN, usato come fallback."""
+    parts = []
+    if isinstance(detail, dict):
+        for key in ["text", "displayText", "description", "headline", "shortText"]:
+            value = detail.get(key)
+            if value:
+                parts.append(str(value))
+        type_data = detail.get("type") or {}
+        if isinstance(type_data, dict):
+            for key in ["text", "name", "abbreviation", "description", "shortDetail"]:
+                value = type_data.get(key)
+                if value:
+                    parts.append(str(value))
+    return " ".join(p for p in parts if p).strip()
+
+
+def _espn_detail_search_text(detail):
+    return _espn_detail_text(detail).lower()
+
+
+def _espn_detail_team_side(detail, home_id, away_id):
+    team = detail.get("team") or {}
+    team_id = ""
+    if isinstance(team, dict):
+        team_id = str(team.get("id") or "")
+    team_id = team_id or str(detail.get("teamId") or detail.get("team_id") or "")
+
+    if team_id and home_id and team_id == str(home_id):
+        return "home"
+    if team_id and away_id and team_id == str(away_id):
+        return "away"
+    return None
+
+
+def _espn_event_minute(detail):
+    clock = detail.get("clock") or {}
+    minute = ""
+    if isinstance(clock, dict):
+        minute = clock.get("displayValue") or clock.get("displayClock") or clock.get("value") or ""
+    minute = minute or detail.get("displayClock") or detail.get("time") or detail.get("minute") or ""
+    minute = str(minute).strip()
+    if minute and minute.isdigit():
+        minute = f"{minute}'"
+    return minute
+
+
+def _espn_person_name(obj):
+    if not isinstance(obj, dict):
+        return ""
+    for key in ["displayName", "shortName", "fullName", "name", "athleteName"]:
+        value = obj.get(key)
+        if value:
+            return str(value).strip()
+    athlete = obj.get("athlete") or obj.get("player")
+    if isinstance(athlete, dict):
+        return _espn_person_name(athlete)
+    return ""
+
+
+def _espn_detail_people(detail):
+    """Estrae nomi calciatori da varie strutture ESPN possibili.
+
+    ESPN, per il calcio, spesso usa `athletesInvolved` negli eventi live
+    (gol, cartellini, sostituzioni). Se non lo leggiamo, il bot vede solo
+    etichette generiche tipo `Goal` o `Yellow Card`.
+    """
+    people = []
+
+    for key in [
+        "athletesInvolved",
+        "athleteInvolved",
+        "participantsInvolved",
+        "playersInvolved",
+        "athletes",
+        "participants",
+        "players",
+        "competitors",
+    ]:
+        value = detail.get(key)
+        if isinstance(value, list):
+            for item in value:
+                name = _espn_person_name(item)
+                if name and name not in people:
+                    people.append(name)
+        elif isinstance(value, dict):
+            name = _espn_person_name(value)
+            if name and name not in people:
+                people.append(name)
+
+    for key in ["athlete", "participant", "player"]:
+        value = detail.get(key)
+        if isinstance(value, dict):
+            name = _espn_person_name(value)
+            if name and name not in people:
+                people.append(name)
+
+    return people
+
+
+def _espn_clean_event_fallback(text):
+    text = str(text or "").strip()
+    if not text:
+        return "Evento"
+    # Evita fallback troppo generici quando ESPN non espone il nome.
+    low = text.lower()
+    if low in {"goal", "gol", "yellow card", "red card"}:
+        return text.title()
+    return text[:90]
+
+
+def _espn_format_event_line(minute, label):
+    label = _espn_clean_event_fallback(label)
+    return f"{minute} {label}".strip()[:140]
+
+
+
+def _espn_penalty_result(text):
+    low = (text or "").lower()
+    if any(k in low for k in ["saved", "parato", "save"]):
+        return "❌ Parato"
+    if any(k in low for k in ["missed", "fuori", "off target"]):
+        return "❌ Fuori"
+    if any(k in low for k in ["scored", "made", "goal", "gol"]):
+        return "✅ Goal"
+    return "🎯 Rigore"
+
+
+def espn_event_details_summary(event):
+    comps = event.get("competitions") or []
+    comp = comps[0] if comps else {}
+    details = comp.get("details") or event.get("details") or []
+    home, away = espn_competitors(event)
+    home_id, away_id = home.get("id"), away.get("id")
+
+    cards_y = {"home": 0, "away": 0}
+    cards_r = {"home": 0, "away": 0}
+
+    scorers = []
+    yellows = []
+    reds = []
+    penalties = []
+
+    if not isinstance(details, list):
+        details = []
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+
+        raw_text = _espn_detail_text(detail)
+        text = raw_text.lower()
+        type_data = detail.get("type") or {}
+        type_id = str(type_data.get("id") or "") if isinstance(type_data, dict) else ""
+        side = _espn_detail_team_side(detail, home_id, away_id)
+        minute = _espn_event_minute(detail)
+        people = _espn_detail_people(detail)
+
+        # Usiamo sia il testo sia i flag/ID ESPN: alcuni eventi live hanno
+        # campi strutturati ma poco testo descrittivo.
+        is_yellow = bool(detail.get("yellowCard")) or "yellow" in text or "ammon" in text or type_id in {"74"}
+        is_red = bool(detail.get("redCard")) or "red" in text or "espuls" in text or type_id in {"75"}
+        is_penalty = bool(detail.get("penaltyKick")) or "penalty" in text or "rigor" in text
+        is_goal = (
+            bool(detail.get("scoringPlay"))
+            or detail.get("scoreValue") not in (None, 0, "0")
+            or any(k in text for k in ["goal", "gol", "own goal", "penalty - scored"])
+        ) and not is_yellow and not is_red
+
+        if side and is_yellow:
+            cards_y[side] += 1
+        if side and is_red:
+            cards_r[side] += 1
+
+        if is_goal:
+            name = people[0] if people else ""
+            label = name or raw_text or "Goal"
+            if is_penalty and name:
+                label = f"{name} (rig.)"
+            scorers.append(_espn_format_event_line(minute, label))
+
+        if is_yellow:
+            label = (people[0] if people else raw_text or "Ammonizione")
+            yellows.append(_espn_format_event_line(minute, label))
+
+        if is_red:
+            label = (people[0] if people else raw_text or "Espulsione")
+            reds.append(_espn_format_event_line(minute, label))
+
+
+        # Se ESPN invia una sequenza rigori, la mostriamo in sezione dedicata.
+        if is_penalty and not is_yellow and not is_red:
+            name = people[0] if people else raw_text or "Rigore"
+            result = _espn_penalty_result(raw_text)
+            if name and result not in name:
+                penalties.append(_espn_format_event_line(minute, f"{result} {name}"))
+            else:
+                penalties.append(_espn_format_event_line(minute, result))
+
+    return {
+        "yellow": cards_y,
+        "red": cards_r,
+        "scorers": scorers[:8],
+        "yellows": yellows[:8],
+        "reds": reds[:8],
+        "penalties": penalties[:10],
+    }
+
+def espn_event_is_live(event):
+    status = event.get("status") or {}
+    type_data = status.get("type") or {}
+    state = str(type_data.get("state") or "").lower()
+    name = str(type_data.get("name") or type_data.get("description") or "").lower()
+    return state == "in" or "in progress" in name or "halftime" in name
+
+
+def espn_event_status_text(event):
+    """Formato pulito: minuto una sola volta + fase partita."""
+    status = event.get("status") or {}
+    type_data = status.get("type") or {}
+
+    display_clock = str(status.get("displayClock") or "").strip()
+    short_detail = str(
+        event.get("shortDetail")
+        or type_data.get("shortDetail")
+        or type_data.get("description")
+        or type_data.get("name")
+        or "LIVE"
+    ).strip()
+
+    state_text = " ".join([
+        str(type_data.get("name") or ""),
+        str(type_data.get("description") or ""),
+        str(type_data.get("detail") or ""),
+        str(short_detail or ""),
+    ]).lower()
+
+    period = status.get("period") or event.get("period")
+    phase = ""
+
+    if any(k in state_text for k in ["halftime", "half time", "intervallo"]):
+        return "Intervallo"
+    if any(k in state_text for k in ["full time", "final", "finished", "fine partita"]):
+        return "Fine partita"
+    if any(k in state_text for k in ["penalty", "shootout", "rigori"]):
+        phase = "Rigori"
+    elif any(k in state_text for k in ["extra time", "supplementari"]):
+        phase = "Tempi supplementari"
+    else:
+        try:
+            pnum = int(period)
+        except Exception:
+            pnum = None
+        if pnum == 1:
+            phase = "1° Tempo"
+        elif pnum == 2:
+            phase = "2° Tempo"
+        elif pnum in (3, 4):
+            phase = "Tempi supplementari"
+
+    # Evita casi tipo "45'+4' • 45'+4'".
+    if display_clock and short_detail and display_clock.strip().lower() == short_detail.strip().lower():
+        short_detail = ""
+
+    if display_clock and phase:
+        return f"{display_clock} • {phase}"
+    if display_clock:
+        return display_clock
+    if phase:
+        return phase
+    return short_detail or "LIVE"
+
+def fetch_espn_live_matches():
+    matches = []
+    diagnostics = []
+
+    for league_code, league_name in ESPN_SOCCER_LEAGUES.items():
+        status, data = fetch_espn_scoreboard(league_code)
+        events = data.get("events") or [] if isinstance(data, dict) else []
+        live_events = []
+
+        if status == 200:
+            for event in events:
+                if espn_event_is_live(event):
+                    home, away = espn_competitors(event)
+                    live_events.append({
+                        "league_code": league_code,
+                        "league": league_name,
+                        "event_id": event.get("id"),
+                        "home": home["name"],
+                        "away": away["name"],
+                        "home_score": home["score"],
+                        "away_score": away["score"],
+                        "status": espn_event_status_text(event),
+                        "venue": espn_event_venue(event),
+                        "details": espn_event_details_summary(event),
+                    })
+        else:
+            print(f"[ESPN LIVE] {league_code} status {status}: {data}")
+
+        diagnostics.append({
+            "league": league_name,
+            "code": league_code,
+            "status": status,
+            "events": len(events),
+            "live": len(live_events),
+        })
+        matches.extend(live_events)
+
+    return matches, diagnostics
+
+
+@bot.command(aliases=["diretta"])
+async def live(ctx):
+    """Mostra le partite live tramite ESPN scoreboard, con fallback sui mercati football-data.org."""
+    matches, diagnostics = fetch_espn_live_matches()
+
+    if matches:
+        embed = discord.Embed(
+            title="🔴 Live calcio",
+            description="Partite in corso da ESPN scoreboard pubblico.",
+            color=COLOR_RED,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        for m in matches[:10]:
+            details = m.get("details") or {}
+            yellow = details.get("yellow") or {}
+            red = details.get("red") or {}
+            scorers = details.get("scorers") or []
+            yellows = details.get("yellows") or []
+            reds = details.get("reds") or []
+            penalties = details.get("penalties") or []
+
+            lines = [
+                f"🏆 {m['league']}",
+                f"🕒 {m['status']}",
+            ]
+            if m.get("venue"):
+                # Manteniamo lo stadio completo, come richiesto.
+                lines.append(f"🏟️ Stadio: {m['venue']}")
+            if scorers:
+                lines.append("⚽ Marcatori\n" + "\n".join(scorers[:5]))
+            if yellows:
+                lines.append("🟨 Ammoniti\n" + "\n".join(yellows[:5]))
+            elif (yellow.get("home") or yellow.get("away")):
+                lines.append(f"🟨 Cartellini: {yellow.get('home', 0)}-{yellow.get('away', 0)}")
+            if reds:
+                lines.append("🟥 Espulsi\n" + "\n".join(reds[:5]))
+            elif (red.get("home") or red.get("away")):
+                lines.append(f"🟥 Espulsioni: {red.get('home', 0)}-{red.get('away', 0)}")
+            if penalties:
+                lines.append("🎯 Rigori\n" + "\n".join(penalties[:6]))
+
+            embed.add_field(
+                name=f"⚽ {m['home']} {m['home_score']}-{m['away_score']} {m['away']}",
+                value="\n\n".join(lines)[:1024],
+                inline=False
+            )
+
+        embed.set_footer(text="Comando disponibile anche come !diretta • ESPN fallback gratuito")
+        await ctx.send(embed=embed)
+        return
+
+    # Se ESPN non trova live, mostriamo eventuali mercati live football-data.org.
+    await live_football_data_fallback(ctx)
+
+
+@bot.command()
+@admin_only()
+async def testespn(ctx):
+    """Diagnostica admin per controllare se ESPN restituisce partite live."""
+    matches, diagnostics = fetch_espn_live_matches()
+    embed = discord.Embed(
+        title="🧪 Test ESPN Live",
+        description=f"Partite live trovate: **{len(matches)}**",
+        color=COLOR_CYAN,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    lines = []
+    for d in diagnostics:
+        lines.append(f"`{d['code']}` {d['league']}: HTTP {d['status']} • eventi {d['events']} • live {d['live']}")
+
+    embed.add_field(name="Endpoint controllati", value="\n".join(lines)[:1024] or "N/D", inline=False)
+
+    if matches:
+        live_lines = []
+        for m in matches[:8]:
+            venue = f" • {m['venue']}" if m.get("venue") else ""
+            live_lines.append(f"{m['league']}: {m['home']} {m['home_score']}-{m['away_score']} {m['away']} ({m['status']}){venue}")
+        embed.add_field(name="Live", value="\n".join(live_lines)[:1024], inline=False)
+
+    embed.set_footer(text="ESPN è un endpoint pubblico non ufficiale: usare sempre con fallback.")
+    await ctx.send(embed=embed)
+
+
+async def live_football_data_fallback(ctx):
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool, total_pool, match_key
+        FROM markets
+        WHERE active=1
+    """)
+
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Nessuna partita live trovata e nessun mercato attivo")
+        return
+
+    embed = discord.Embed(
+        title="🔴 Mercati live",
+        description="Fallback football-data.org sui mercati attivi",
+        color=COLOR_RED
+    )
+    found_live = False
+
+    for market_id, question, yes, no, total, match_key in rows:
+        if not match_key or not match_key.startswith("MATCH_"):
+            continue
+
+        try:
+            match_id = int(match_key.replace("MATCH_", ""))
+        except Exception:
+            continue
+
+        res = get_match_result(match_id)
+
+        if not res:
+            continue
+
+        if res["status"] not in ["IN_PLAY", "PAUSED", "LIVE"]:
+            continue
+
+        found_live = True
+        yes_p, no_p = market_probabilities(yes, no)
+
+        score = "N/D"
+        if res["home_goals"] is not None and res["away_goals"] is not None:
+            score = f'{res["home_goals"]}-{res["away_goals"]}'
+
+        embed.add_field(
+            name=f"🆔 Mercato {market_id} | {res['home']} vs {res['away']}",
+            value=(
+                f"⚽ Risultato: **{score}** | 📡 {res['status']}\n"
+                f"❓ {question}\n"
+                f"🟢 YES: **{yes_p}%** `{progress_bar(yes_p, 10)}`\n"
+                f"🔴 NO: **{no_p}%**\n"
+                f"💰 Pool: **{total}**"
+            ),
+            inline=False
+        )
+
+    if not found_live:
+        await ctx.send("📭 Nessuna partita live in questo momento")
+        return
+
+    embed.set_footer(text="Comando disponibile anche come !diretta")
+    await ctx.send(embed=embed)
+
+
+# =========================
+# BUY + PRICE UPDATE
+# =========================
+@bot.command(aliases=["compra"])
+async def buy(ctx, market_id: int, side: str, amount: int):
+    user_id = str(ctx.author.id)
+    side = side.upper()
+
+    if amount <= 0:
+        await ctx.send("❌ Importo non valido")
+        return
+
+    if side not in ["YES", "NO"]:
+        await ctx.send("❌ Side non valido (YES/NO)")
+        return
+
+    c.execute("SELECT active FROM markets WHERE id=?", (market_id,))
+    m = c.fetchone()
+
+    if not m or m[0] == 0:
+        await ctx.send("❌ Mercato chiuso")
+        return
+
+    c.execute("""
+        SELECT COALESCE(SUM(COALESCE(buy_count, 1)), 0)
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+    """, (user_id, market_id))
+    buy_count = c.fetchone()[0] or 0
+
+    if buy_count >= MAX_BUYS_PER_USER_MARKET:
+        await ctx.send(f"❌ Hai già raggiunto il limite di {MAX_BUYS_PER_USER_MARKET} acquisti su questo mercato.")
+        return
+
+    bal = get_user(user_id)
+
+    if bal < amount:
+        await ctx.send("❌ Fondi insufficienti")
+        return
+
+    c.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, user_id))
+
+    if side == "YES":
+        c.execute("""
+            UPDATE markets
+            SET yes_pool = yes_pool + ?,
+                total_pool = total_pool + ?,
+                trade_count = COALESCE(trade_count, 0) + 1,
+                buy_volume = COALESCE(buy_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
+            WHERE id=?
+        """, (amount, amount, amount, amount, market_id))
+    else:
+        c.execute("""
+            UPDATE markets
+            SET no_pool = no_pool + ?,
+                total_pool = total_pool + ?,
+                trade_count = COALESCE(trade_count, 0) + 1,
+                buy_volume = COALESCE(buy_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
+            WHERE id=?
+        """, (amount, amount, amount, amount, market_id))
+
+    c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
+    yes, no = c.fetchone()
+
+    yes_p, no_p = market_probabilities(yes, no)
+    trade_price = yes_p if side == "YES" else no_p
+
+    # Posizioni cumulative: se l'utente ha già una posizione aperta sullo
+    # stesso mercato/lato, aggiorniamo quella riga invece di crearne una nuova.
+    # Il prezzo viene ricalcolato come media ponderata.
+    c.execute("""
+        SELECT id, amount, price, COALESCE(buy_count, 1)
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+          AND side=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+        ORDER BY id ASC
+        LIMIT 1
+    """, (user_id, market_id, side))
+    existing_position = c.fetchone()
+
+    if existing_position:
+        trade_id, old_amount, old_price, old_buy_count = existing_position
+        old_amount = old_amount or 0
+        old_price = safe_entry_price(old_price, trade_price)
+        new_amount = old_amount + amount
+        new_avg_price = ((old_amount * old_price) + (amount * trade_price)) / new_amount
+
+        c.execute("""
+            UPDATE trades
+            SET amount=?,
+                price=?,
+                buy_count=?
+            WHERE id=?
+        """, (new_amount, new_avg_price, (old_buy_count or 1) + 1, trade_id))
+    else:
+        c.execute("""
+            INSERT INTO trades (user_id, market_id, side, amount, price, closed, buy_count)
+            VALUES (?, ?, ?, ?, ?, 0, 1)
+        """, (user_id, market_id, side, amount, trade_price))
+
+    save_price(market_id, yes_p)
+    award_xp(user_id, max(5, amount // 20))
+    record_wealth_snapshot(user_id)
+    conn.commit()
+
+    embed = discord.Embed(
+        title="📈 Acquisto effettuato",
+        color=COLOR_PINK
+    )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="📊 Posizione", value=side, inline=True)
+    embed.add_field(name="💸 Puntata", value=f"+{amount}", inline=True)
+    embed.add_field(name="🟢 YES", value=f"{yes_p}%", inline=True)
+    embed.add_field(name="🔴 NO", value=f"{no_p}%", inline=True)
+    volume_stats = get_market_volume_stats(market_id)
+    embed.add_field(name="📦 Volume mercato", value=f"{volume_stats['total_volume']} crediti", inline=True)
+    c.execute("""
+        SELECT SUM(amount),
+               CASE
+                   WHEN SUM(amount) > 0 THEN SUM(amount * COALESCE(price, 50)) / SUM(amount)
+                   ELSE ?
+               END
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+          AND side=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+    """, (trade_price, user_id, market_id, side))
+    cumulative_amount, avg_price = c.fetchone()
+    embed.add_field(name="📦 Quota cumulativa", value=f"{int(cumulative_amount or amount)} crediti", inline=True)
+    embed.add_field(name="🎯 Prezzo medio", value=f"{float(avg_price or trade_price):.1f}%", inline=True)
+    embed.add_field(name="📉 Barra", value=f"`{progress_bar(yes_p)}`", inline=False)
+
+    await ctx.send(embed=embed)
+    await check_personal_alerts_for_market(market_id, fallback_channel=ctx.channel)
+    await evaluate_user_badges(user_id, notify=True)
+
+# =========================
+# SELL POSITION
+# =========================
+@bot.command(aliases=["vendi"])
+async def sell(ctx, market_id: int, percent: str, side: str = None):
+    user_id = str(ctx.author.id)
+    pct = parse_percent(percent)
+
+    if pct is None:
+        await ctx.send("❌ Percentuale non valida. Esempio: `!sell 3 50%`")
+        return
+
+    if side is not None:
+        side = side.upper()
+        if side not in ["YES", "NO"]:
+            await ctx.send("❌ Side non valido. Usa YES o NO.")
+            return
+
+    c.execute("SELECT yes_pool, no_pool, active FROM markets WHERE id=?", (market_id,))
+    market = c.fetchone()
+
+    if not market:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    yes_pool, no_pool, active = market
+
+    if active == 0:
+        await ctx.send("❌ Non puoi vendere su un mercato chiuso")
+        return
+
+    c.execute("""
+        SELECT id, side, amount, price
+        FROM trades
+        WHERE user_id=?
+          AND market_id=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+        ORDER BY id ASC
+    """, (user_id, market_id))
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("❌ Non hai posizioni aperte su questo mercato")
+        return
+
+    sides_open = sorted(set(r[1] for r in rows))
+
+    if side is None:
+        if len(sides_open) > 1:
+            await ctx.send("❌ Hai posizioni sia YES che NO. Specifica cosa vendere: `!sell 3 50% YES`")
+            return
+        side = sides_open[0]
+
+    rows = [r for r in rows if r[1] == side]
+
+    if not rows:
+        await ctx.send(f"❌ Non hai posizioni aperte {side} su questo mercato")
+        return
+
+    yes_p, no_p = market_probabilities(yes_pool, no_pool)
+    current_price = yes_p if side == "YES" else no_p
+
+    total_position = sum(r[2] for r in rows)
+    sell_amount = int(round(total_position * (pct / 100)))
+
+    if sell_amount <= 0:
+        await ctx.send("❌ Importo venduto troppo basso")
+        return
+
+    weighted_entry_sum = 0.0
+    for _, _, amount, price in rows:
+        entry_price = safe_entry_price(price, current_price)
+        weighted_entry_sum += amount * entry_price
+
+    avg_entry_price = weighted_entry_sum / total_position
+    proceeds = int(round(sell_amount * (current_price / avg_entry_price)))
+    profit = proceeds - sell_amount
+
+    remaining_to_sell = sell_amount
+
+    for trade_id, _, amount, _ in rows:
+        if remaining_to_sell <= 0:
+            break
+
+        reduce_amount = min(amount, remaining_to_sell)
+        new_amount = amount - reduce_amount
+
+        if new_amount <= 0:
+            c.execute("UPDATE trades SET amount=0, closed=1 WHERE id=?", (trade_id,))
+        else:
+            c.execute("UPDATE trades SET amount=? WHERE id=?", (new_amount, trade_id))
+
+        remaining_to_sell -= reduce_amount
+
+    pool_reduction = sell_amount
+
+    if side == "YES":
+        pool_reduction = min(pool_reduction, yes_pool)
+        c.execute("""
+            UPDATE markets
+            SET yes_pool = yes_pool - ?,
+                total_pool = MAX(total_pool - ?, 0),
+                trade_count = COALESCE(trade_count, 0) + 1,
+                sell_volume = COALESCE(sell_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
+            WHERE id=?
+        """, (pool_reduction, pool_reduction, sell_amount, sell_amount, market_id))
+    else:
+        pool_reduction = min(pool_reduction, no_pool)
+        c.execute("""
+            UPDATE markets
+            SET no_pool = no_pool - ?,
+                total_pool = MAX(total_pool - ?, 0),
+                trade_count = COALESCE(trade_count, 0) + 1,
+                sell_volume = COALESCE(sell_volume, 0) + ?,
+                total_volume = COALESCE(total_volume, 0) + ?
+            WHERE id=?
+        """, (pool_reduction, pool_reduction, sell_amount, sell_amount, market_id))
+
+    c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (proceeds, user_id))
+
+    c.execute("SELECT yes_pool, no_pool FROM markets WHERE id=?", (market_id,))
+    new_yes, new_no = c.fetchone()
+    new_yes_p, new_no_p = market_probabilities(new_yes, new_no)
+    save_price(market_id, new_yes_p)
+    award_xp(user_id, max(3, proceeds // 25))
+    record_wealth_snapshot(user_id)
+
+    conn.commit()
+    bal = get_user(user_id)
+
+    embed = discord.Embed(
+        title="💸 Posizione venduta",
+        color=COLOR_PINK
+    )
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="📊 Side", value=side, inline=True)
+    embed.add_field(name="📉 Venduto", value=f"{pct:.1f}%", inline=True)
+    embed.add_field(name="💰 Incassato", value=str(proceeds), inline=True)
+    embed.add_field(name="📊 Profitto/Perdita", value=f"{profit:+.0f}", inline=True)
+    embed.add_field(name="💼 Saldo aggiornato", value=str(bal), inline=True)
+    embed.add_field(name="🎯 Prezzo medio", value=f"{avg_entry_price:.1f}%", inline=True)
+    embed.add_field(name="📍 Prezzo vendita", value=f"{current_price:.1f}%", inline=True)
+    embed.add_field(name="🟢 YES", value=f"{new_yes_p}%", inline=True)
+    embed.add_field(name="🔴 NO", value=f"{new_no_p}%", inline=True)
+    volume_stats = get_market_volume_stats(market_id)
+    embed.add_field(name="📦 Volume mercato", value=f"{volume_stats['total_volume']} crediti", inline=True)
+    embed.add_field(name="📉 Barra", value=f"`{progress_bar(new_yes_p)}`", inline=False)
+
+    await ctx.send(embed=embed)
+    await evaluate_user_badges(user_id, notify=True)
+
+
+# =========================
+# V2.0.2 MARKET VOLUME + TOP MOVERS
+# =========================
+@bot.command(aliases=["volumi", "liquidita"])
+async def volume(ctx, market_id: int = None):
+    """Mostra volume e liquidità di un mercato o la top per volume."""
+    if market_id is not None:
+        c.execute("""
+            SELECT question, yes_pool, no_pool, active, resolved, result
+            FROM markets
+            WHERE id=?
+        """, (market_id,))
+        row = c.fetchone()
+        if not row:
+            await ctx.send("❌ Mercato non trovato")
+            return
+
+        question, yes_pool, no_pool, active, resolved, result = row
+        yes_p, no_p = market_probabilities(yes_pool, no_pool)
+        stats = get_market_volume_stats(market_id)
+        change = calculate_market_change(market_id)
+        status = "🟢 Attivo" if active else (f"⚪ Risolto: {result}" if resolved else "⚪ Chiuso")
+
+        embed = discord.Embed(
+            title=f"📦 Volume mercato #{market_id}",
+            description=question,
+            color=COLOR_CYAN
+        )
+        embed.add_field(name="📉 Stato", value=status, inline=True)
+        embed.add_field(name="💧 Liquidità", value=f"{stats['liquidity']} crediti", inline=True)
+        embed.add_field(name="📦 Volume totale", value=f"{stats['total_volume']} crediti", inline=True)
+        embed.add_field(name="🛒 Volume buy", value=f"{stats['buy_volume']} crediti", inline=True)
+        embed.add_field(name="💸 Volume sell", value=f"{stats['sell_volume']} crediti", inline=True)
+        embed.add_field(name="🔁 Operazioni", value=str(stats['trades']), inline=True)
+        embed.add_field(name="🟢 YES", value=f"{yes_p}%", inline=True)
+        embed.add_field(name="🔴 NO", value=f"{no_p}%", inline=True)
+        embed.add_field(name="🚀 Movimento YES", value=signed_fmt(change), inline=True)
+        embed.set_footer(text="v2.0.2 • Volume, liquidità e movimento del mercato")
+        await ctx.send(embed=embed)
+        return
+
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool,
+               COALESCE(total_volume, 0), COALESCE(trade_count, 0), COALESCE(total_pool, 0)
+        FROM markets
+        ORDER BY COALESCE(total_volume, 0) DESC, id DESC
+        LIMIT 10
+    """)
+    rows = c.fetchall()
+    if not rows:
+        await ctx.send("📭 Nessun mercato disponibile.")
+        return
+
+    lines = []
+    for mid, question, yes_pool, no_pool, total_volume, trade_count, liquidity in rows:
+        yes_p, no_p = market_probabilities(yes_pool, no_pool)
+        short_q = question if len(question) <= 70 else question[:67] + "..."
+        lines.append(
+            f"**#{mid}** • 📦 **{total_volume}** crediti • 💧 {liquidity} • 🔁 {trade_count}\n"
+            f"{short_q}\n🟢 YES {yes_p}% | 🔴 NO {no_p}%"
+        )
+
+    embed = discord.Embed(
+        title="📦 Mercati per volume",
+        description="\n\n".join(lines),
+        color=COLOR_CYAN
+    )
+    embed.set_footer(text="Usa !volume ID per il dettaglio di un mercato")
+    await ctx.send(embed=embed)
+
+
+@bot.command(aliases=["topmover", "movers", "movimenti"])
+async def topmovers(ctx):
+    """Mostra i mercati con i movimenti più forti del prezzo YES."""
+    c.execute("""
+        SELECT id, question, yes_pool, no_pool,
+               COALESCE(total_volume, 0), COALESCE(trade_count, 0), active, resolved
+        FROM markets
+        ORDER BY id DESC
+        LIMIT 80
+    """)
+    rows = c.fetchall()
+
+    movers = []
+    for mid, question, yes_pool, no_pool, total_volume, trade_count, active, resolved in rows:
+        change = calculate_market_change(mid)
+        if abs(change) < 0.1 and total_volume <= 0:
+            continue
+        yes_p, no_p = market_probabilities(yes_pool, no_pool)
+        movers.append((abs(change), change, mid, question, yes_p, no_p, total_volume, trade_count, active, resolved))
+
+    movers.sort(reverse=True, key=lambda x: x[0])
+    movers = movers[:10]
+
+    if not movers:
+        await ctx.send("📭 Non ci sono ancora movimenti sufficienti da mostrare.")
+        return
+
+    lines = []
+    for _, change, mid, question, yes_p, no_p, total_volume, trade_count, active, resolved in movers:
+        arrow = "🚀" if change > 0 else "📉" if change < 0 else "➖"
+        status = "🟢" if active else "⚪"
+        short_q = question if len(question) <= 72 else question[:69] + "..."
+        lines.append(
+            f"{status} **#{mid}** {arrow} **{signed_fmt(change)}** • YES **{yes_p}%** / NO **{no_p}%**\n"
+            f"{short_q}\n📦 Volume: **{total_volume}** • 🔁 Trade: **{trade_count}**"
+        )
+
+    embed = discord.Embed(
+        title="🚀 Top Movers",
+        description="\n\n".join(lines),
+        color=COLOR_ORANGE
+    )
+    embed.set_footer(text="v2.0.2 • Mercati con maggiore variazione del prezzo YES")
+    await ctx.send(embed=embed)
+
+
+# =========================
+# CHART
+# =========================
+@bot.command(aliases=["grafico"])
+async def chart(ctx, market_id: int):
+    c.execute("""
+        SELECT m.question, m.yes_pool, m.no_pool, m.total_pool, m.active, m.resolved, m.result
+        FROM markets m
+        WHERE m.id=?
+    """, (market_id,))
+    market_row = c.fetchone()
+
+    if not market_row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    question, yes_pool, no_pool, total_pool, active, resolved, result = market_row
+    current_yes, current_no = market_probabilities(yes_pool, no_pool)
+
+    c.execute("""
+        SELECT timestamp, yes_price
+        FROM price_history
+        WHERE market_id=?
+        ORDER BY id ASC
+        LIMIT 80
+    """, (market_id,))
+
+    data = c.fetchall()
+
+    if len(data) < 2:
+        await ctx.send("❌ Dati insufficienti")
+        return
+
+    times = [d[0] for d in data]
+    yes_prices = [float(d[1]) for d in data]
+    no_prices = [100 - y for y in yes_prices]
+    x = list(range(len(yes_prices)))
+
+    opening_yes = yes_prices[0]
+    price_change = current_yes - opening_yes
+    direction_icon = "📈" if price_change > 0 else "📉" if price_change < 0 else "➖"
+    change_color = "#22c55e" if price_change > 0 else "#ef4444" if price_change < 0 else "#e5e7eb"
+
+    def moving_average(arr, window=4):
+        if len(arr) < window:
+            return arr
+
+        smoothed = []
+        for i in range(len(arr)):
+            start = max(0, i - window + 1)
+            chunk = arr[start:i + 1]
+            smoothed.append(sum(chunk) / len(chunk))
+        return smoothed
+
+    yes_smooth = moving_average(yes_prices)
+    no_smooth = moving_average(no_prices)
+
+    # Curve ondulate: moving average + spline, con fallback lineare se scipy non è disponibile.
+    x_plot = np.array(x, dtype=float)
+    yes_plot = np.array(yes_smooth, dtype=float)
+    no_plot = np.array(no_smooth, dtype=float)
+
+    if make_interp_spline and len(x_plot) >= 4:
+        x_curve = np.linspace(x_plot.min(), x_plot.max(), 240)
+        spline_k = min(3, len(x_plot) - 1)
+        try:
+            yes_curve = make_interp_spline(x_plot, yes_plot, k=spline_k)(x_curve)
+            no_curve = make_interp_spline(x_plot, no_plot, k=spline_k)(x_curve)
+            yes_curve = np.clip(yes_curve, 0, 100)
+            no_curve = np.clip(no_curve, 0, 100)
+        except Exception:
+            x_curve = x_plot
+            yes_curve = yes_plot
+            no_curve = no_plot
+    else:
+        x_curve = x_plot
+        yes_curve = yes_plot
+        no_curve = no_plot
+
+    short_question = question if len(question) <= 90 else question[:87] + "..."
+    status_text = "ATTIVO" if active == 1 else f"CHIUSO ({result or 'N/D'})"
+    updated_at = datetime.utcnow().strftime("%H:%M UTC")
+
+    fig = plt.figure(figsize=(11, 6), dpi=140)
+    fig.patch.set_facecolor("#0b0f19")
+
+    # Background card
+    ax_bg = fig.add_axes([0, 0, 1, 1])
+    ax_bg.axis("off")
+    ax_bg.set_facecolor("#0b0f19")
+
+    ax_bg.text(0.05, 0.91, f"Andamento mercato #{market_id}", fontsize=24, fontweight="bold", fontfamily="Liberation Sans", color="white")
+    ax_bg.text(0.05, 0.855, short_question, fontsize=10.5, color="#9ca3af")
+    ax_bg.text(0.82, 0.91, status_text, fontsize=11, fontweight="bold", color="#facc15", ha="right")
+
+    # Stat cards
+    ax_bg.text(0.055, 0.755, "YES", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.055, 0.695, f"{current_yes:.1f}%", fontsize=25, color="#22c55e", fontweight="bold")
+
+    ax_bg.text(0.245, 0.755, "NO", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.245, 0.695, f"{current_no:.1f}%", fontsize=25, color="#ef4444", fontweight="bold")
+
+    ax_bg.text(0.435, 0.755, "POOL", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.435, 0.695, f"{total_pool}", fontsize=25, color="white", fontweight="bold")
+
+    ax_bg.text(0.625, 0.755, "VAR. APERTURA", fontsize=10, color="#9ca3af", fontweight="bold")
+    ax_bg.text(0.625, 0.695, f"{direction_icon} {price_change:+.1f}%", fontsize=25, color=change_color, fontweight="bold")
+
+    # Chart area
+    ax = fig.add_axes([0.07, 0.18, 0.86, 0.42])
+    ax.set_facecolor("#0b0f19")
+
+    ax.plot(x_curve, yes_curve, linewidth=3.2, color="#22c55e", label="YES")
+    ax.plot(x_curve, no_curve, linewidth=3.2, color="#ef4444", label="NO")
+
+    ax.fill_between(x_curve, yes_curve, 0, alpha=0.10, color="#22c55e")
+    ax.fill_between(x_curve, no_curve, 0, alpha=0.06, color="#ef4444")
+    ax.axhline(50, linestyle="--", linewidth=1, alpha=0.25, color="#9ca3af")
+
+    ax.scatter([x[-1]], [current_yes], color="#22c55e", s=38, zorder=5)
+    ax.scatter([x[-1]], [current_no], color="#ef4444", s=38, zorder=5)
+
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("Probabilità (%)", color="#9ca3af", fontsize=9)
+    ax.grid(True, alpha=0.12)
+
+    step = max(1, len(x) // 6)
+    tick_positions = list(range(0, len(x), step))
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([times[i] for i in tick_positions], rotation=25, color="#9ca3af", fontsize=8)
+
+    ax.tick_params(colors="#9ca3af", labelsize=8)
+
+    for spine in ax.spines.values():
+        spine.set_color("#1f2937")
+
+    legend = ax.legend(loc="upper left", frameon=True, fontsize=9)
+    legend.get_frame().set_facecolor("#111827")
+    legend.get_frame().set_edgecolor("#1f2937")
+
+    ax_bg.text(0.05, 0.08, f"Apertura YES: {opening_yes:.1f}% • Grafico aggiornato alle {updated_at}", fontsize=9, color="#6b7280")
+    ax_bg.text(0.74, 0.08, "Prediction Market Bot • v1.9.2", fontsize=9, color="#6b7280", ha="right")
+
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format="png", facecolor="#0b0f19", bbox_inches="tight", pad_inches=0.15)
+    buffer.seek(0)
+
+    await ctx.send(file=discord.File(buffer, "market_dashboard.png"))
+
+    plt.close(fig)
+
+
+
+# =========================
+# ADMIN MARKET MANAGEMENT
+# =========================
+@bot.command(aliases=["chiudimercato"])
+@admin_only()
+async def closemarket(ctx, market_id: int):
+    await delete_admin_command_message(ctx)
+    """Chiude un mercato senza payout."""
+    c.execute("SELECT id, question, active, resolved, match_key FROM markets WHERE id=?", (market_id,))
+    row = c.fetchone()
+
+    if not row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    _, question, active, resolved, match_key = row
+
+    if active == 0:
+        await ctx.send("⚠️ Mercato già chiuso")
+        return
+
+    c.execute("""
+        UPDATE markets
+        SET active=0,
+            resolved=0,
+            result='CLOSED'
+        WHERE id=?
+    """, (market_id,))
+    conn.commit()
+
+    result_channel = await get_discord_channel_safe(RESULTS_CHANNEL_ID)
+    embed = discord.Embed(
+        title="🔒 Mercato chiuso manualmente",
+        description=question,
+        color=COLOR_RESOLVED
+    )
+    embed.add_field(name="🏟️ Partita / Evento", value="Mercato chiuso manualmente", inline=False)
+    embed.add_field(name="⚽ Risultato finale", value="N/D", inline=True)
+    embed.add_field(name="🏆 Vincitore", value="Nessun vincitore", inline=True)
+    embed.add_field(name="🎯 Esito mercato", value="⚪ CHIUSO", inline=True)
+    embed.add_field(name="💰 Payout", value=f"Mercato #{market_id} chiuso • Nessun payout distribuito", inline=False)
+    embed.set_footer(text="Mercato chiuso manualmente. Grazie per aver giocato!")
+
+    if result_channel:
+        await result_channel.send(embed=embed)
+        await ctx.send(f"✅ Mercato #{market_id} chiuso e pubblicato nel canale risultati.")
+    else:
+        await ctx.send("⚠️ Canale risultati non trovato. Pubblico qui il riepilogo.", embed=embed)
+        print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
+
+    await log_admin_activity(
+        ctx,
+        "🔒 !closemarket",
+        market_id=market_id,
+        details=f"Mercato chiuso senza payout • {question}",
+        color=COLOR_WHITE
+    )
+
+
+@bot.command(aliases=["annullamercato"])
+@admin_only()
+async def cancelmarket(ctx, market_id: int):
+    await delete_admin_command_message(ctx)
+    """Annulla un mercato e rimborsa le posizioni aperte."""
+    c.execute("SELECT id, question, active, resolved, match_key FROM markets WHERE id=?", (market_id,))
+    row = c.fetchone()
+
+    if not row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    _, question, active, resolved, match_key = row
+
+    c.execute("""
+        SELECT user_id, SUM(amount)
+        FROM trades
+        WHERE market_id=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+        GROUP BY user_id
+    """, (market_id,))
+    refunds = c.fetchall()
+
+    total_refund = 0
+    for user_id, amount in refunds:
+        amount = int(amount or 0)
+        if amount <= 0:
+            continue
+        total_refund += amount
+        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+        record_wealth_snapshot(user_id)
+
+    c.execute("""
+        UPDATE trades
+        SET closed=1
+        WHERE market_id=?
+          AND amount > 0
+          AND (closed IS NULL OR closed=0)
+    """, (market_id,))
+
+    c.execute("""
+        UPDATE markets
+        SET active=0,
+            resolved=1,
+            result='CANCELLED'
+        WHERE id=?
+    """, (market_id,))
+    conn.commit()
+
+    embed = discord.Embed(
+        title="🚫 Mercato annullato",
+        description=question,
+        color=COLOR_RED
+    )
+    embed.add_field(name="🆔 Mercato", value=str(market_id), inline=True)
+    embed.add_field(name="💸 Rimborsi totali", value=f"{total_refund} crediti", inline=True)
+    embed.set_footer(text="Le posizioni aperte sono state chiuse e rimborsate.")
+    await ctx.send(embed=embed)
+    await log_admin_activity(
+        ctx,
+        "❌ !cancelmarket",
+        market_id=market_id,
+        details=f"Mercato annullato e rimborsato • Rimborsi totali: {total_refund} crediti • {question}",
+        color=COLOR_WHITE
+    )
+
+
+@bot.command(name="resolve", aliases=["risolvi"])
+@admin_only()
+async def resolve_market_command(ctx, market_id: int, result: str):
+    await delete_admin_command_message(ctx)
+    """Risolve manualmente un mercato con YES o NO e distribuisce il payout."""
+    result = result.upper()
+
+    if result not in ["YES", "NO"]:
+        await ctx.send("❌ Risultato non valido. Usa YES o NO.")
+        return
+
+    c.execute("SELECT id, question, active, resolved, match_key FROM markets WHERE id=?", (market_id,))
+    row = c.fetchone()
+
+    if not row:
+        await ctx.send("❌ Mercato non trovato")
+        return
+
+    _, question, active, resolved, match_key = row
+
+    if resolved == 1:
+        await ctx.send("⚠️ Mercato già risolto")
+        return
+
+    c.execute("""
+        UPDATE markets
+        SET active=0,
+            resolved=1,
+            result=?
+        WHERE id=?
+    """, (result, market_id))
+    conn.commit()
+
+    update_streaks_for_market(market_id, result)
+    total_paid = payout_market(market_id, result)
+
+    c.execute("SELECT DISTINCT user_id FROM trades WHERE market_id=?", (market_id,))
+    for (affected_user_id,) in c.fetchall():
+        await evaluate_user_badges(affected_user_id, notify=True)
+
+    outcome_icon = "🟢 YES" if result == "YES" else "🔴 NO"
+    partita_text = "Evento speciale / mercato manuale"
+    score_text = "Risoluzione manuale"
+    winner_text = "N/D"
+
+    if match_key and str(match_key).startswith("MATCH_"):
+        try:
+            match_api_id = str(match_key).replace("MATCH_", "")
+            res = get_match_result(match_api_id)
+            if res:
+                partita_text = f'{res["home"]} vs {res["away"]}'
+                if res["home_goals"] is not None and res["away_goals"] is not None:
+                    score_text = f'{res["home_goals"]}-{res["away_goals"]}'
+                winner_api = res.get("winner")
+                if winner_api == "HOME":
+                    winner_text = res["home"]
+                elif winner_api == "AWAY":
+                    winner_text = res["away"]
+                elif winner_api == "DRAW":
+                    winner_text = "Pareggio"
+        except Exception as e:
+            print(f"[RESULTS CHANNEL MANUAL] Errore recupero match: {e}")
+
+    result_embed = discord.Embed(
+        title="🏁 Mercato risolto",
+        description=question,
+        color=COLOR_RESOLVED
+    )
+    result_embed.add_field(name="🏟️ Partita", value=partita_text, inline=False)
+    result_embed.add_field(name="⚽ Risultato finale", value=score_text, inline=True)
+    result_embed.add_field(name="🏆 Vincitore", value=winner_text, inline=True)
+    result_embed.add_field(name="🎯 Esito mercato", value=outcome_icon, inline=True)
+    result_embed.add_field(name="💰 Payout", value=f"Mercato #{market_id} risolto • {total_paid} crediti distribuiti", inline=False)
+    result_embed.set_footer(text="Grazie per aver giocato!")
+
+    result_channel = await get_discord_channel_safe(RESULTS_CHANNEL_ID)
+    if result_channel:
+        await result_channel.send(embed=result_embed)
+        await ctx.send(f"✅ Mercato #{market_id} risolto e pubblicato nel canale risultati.")
+    else:
+        await ctx.send("⚠️ Canale risultati non trovato. Pubblico qui il riepilogo.", embed=result_embed)
+        print(f"[RESULTS CHANNEL] Canale {RESULTS_CHANNEL_ID} non trovato.")
+
+    await check_personal_alerts_for_market(market_id, fallback_channel=ctx.channel, only_resolved=True)
+
+    await log_admin_activity(
+        ctx,
+        "✅ !resolve",
+        market_id=market_id,
+        details=f"Risoluzione manuale: {result} • Payout: {total_paid} crediti • {question}",
+        color=COLOR_WHITE
+    )
+
+
+@bot.command(aliases=["aggiungisaldo"])
+@admin_only()
+async def addbalance(ctx, member: discord.Member, amount: int):
+    if amount <= 0:
+        await ctx.send("❌ Importo non valido")
+        return
+
+    user_id = str(member.id)
+    get_user(user_id)
+    c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    await ctx.send(f"✅ Aggiunti **{amount}** crediti a {member.mention}.")
+    await log_admin_activity(
+        ctx,
+        "💰 !addbalance",
+        details=f"Aggiunti {amount} crediti a {member.mention} (`{member.id}`)",
+        color=COLOR_WHITE
+    )
+
+
+@bot.command(aliases=["rimuovisaldo"])
+@admin_only()
+async def removebalance(ctx, member: discord.Member, amount: int):
+    if amount <= 0:
+        await ctx.send("❌ Importo non valido")
+        return
+
+    user_id = str(member.id)
+    get_user(user_id)
+    c.execute("UPDATE users SET balance = MAX(balance - ?, 0) WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    await ctx.send(f"✅ Rimossi fino a **{amount}** crediti da {member.mention}.")
+    await log_admin_activity(
+        ctx,
+        "💸 !removebalance",
+        details=f"Rimossi fino a {amount} crediti da {member.mention} (`{member.id}`)",
+        color=COLOR_WHITE
+    )
+
+
+@bot.command(aliases=["resetutente"])
+@admin_only()
+async def resetuser(ctx, member: discord.Member):
+    user_id = str(member.id)
+    c.execute("INSERT OR REPLACE INTO users (user_id, balance) VALUES (?, ?)", (user_id, 1000))
+    c.execute("""
+        INSERT OR REPLACE INTO user_stats (user_id, xp, current_streak, best_streak, last_daily)
+        VALUES (?, 0, 0, 0, NULL)
+    """, (user_id,))
+    c.execute("UPDATE trades SET amount=0, closed=1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+
+    await ctx.send(f"🔄 Utente {member.mention} resettato a **1000 crediti**.")
+    await log_admin_activity(
+        ctx,
+        "♻️ !resetuser",
+        details=f"Utente resettato a 1000 crediti: {member.mention} (`{member.id}`)",
+        color=COLOR_WHITE
+    )
+
+
+# =========================
+# PERSONAL ALERT COMMANDS
+# =========================
+@bot.group(name="alert", invoke_without_command=True)
+async def alert_group(ctx, alert_type: str = None, market_id: int = None, side_or_value: str = None, value: str = None):
+    user_id = str(ctx.author.id)
+
+    if not alert_type:
+        embed = discord.Embed(
+            title="🔔 Alert personali",
+            description="Crea notifiche personali sui mercati. Le notifiche arrivano in DM; se i DM sono chiusi, il bot prova con mention nel server.",
+            color=COLOR_GOLD
+        )
+        embed.add_field(
+            name="Comandi",
+            value=(
+                "`!alert price ID YES/NO percentuale`\n"
+                "`!alert profit ID percentuale`\n"
+                "`!alert loss ID percentuale`\n"
+                "`!alert closing ID`\n"
+                "`!alert resolved ID`\n"
+                "`!alerts`\n"
+                "`!alert remove ALERT_ID`\n"
+                "`!alert clear`"
+            ),
+            inline=False
+        )
+        await ctx.send(embed=embed)
+        return
+
+    alert_type = alert_type.lower().strip()
+
+    if alert_type not in ["price", "profit", "loss", "closing", "resolved"]:
+        await ctx.send("❌ Tipo alert non valido. Usa `price`, `profit`, `loss`, `closing` o `resolved`.")
+        return
+
+    if market_id is None:
+        await ctx.send("❌ Devi indicare l'ID del mercato.")
+        return
+
+    market = get_market_row(market_id)
+    if not market:
+        await ctx.send("❌ Mercato non trovato.")
+        return
+
+    _, question, *_ = market
+    side = None
+    target_value = None
+
+    if alert_type == "price":
+        if not side_or_value:
+            await ctx.send("❌ Esempio corretto: `!alert price 3 YES 65`")
+            return
+        side = side_or_value.upper()
+        if side not in ["YES", "NO"]:
+            await ctx.send("❌ Side non valido. Usa YES o NO.")
+            return
+        target_value = parse_percent(value)
+        if target_value is None:
+            await ctx.send("❌ Percentuale non valida. Esempio: `!alert price 3 YES 65`")
+            return
+
+    elif alert_type in ["profit", "loss"]:
+        target_value = parse_percent(side_or_value)
+        if target_value is None:
+            await ctx.send(f"❌ Percentuale non valida. Esempio: `!alert {alert_type} 3 20`")
+            return
+
+    elif alert_type in ["closing", "resolved"]:
+        target_value = 0
+
+    c.execute("""
+        INSERT INTO personal_alerts (user_id, market_id, alert_type, side, target_value, active, triggered, created_at)
+        VALUES (?, ?, ?, ?, ?, 1, 0, ?)
+    """, (user_id, market_id, alert_type, side, target_value, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+
+    alert_id = c.lastrowid
+
+    embed = discord.Embed(
+        title="✅ Alert creato",
+        description=question,
+        color=COLOR_GREEN
+    )
+    embed.add_field(name="🆔 Alert", value=f"#{alert_id}", inline=True)
+    embed.add_field(name="🆔 Mercato", value=f"#{market_id}", inline=True)
+    embed.add_field(name="Tipo", value=alert_type, inline=True)
+
+    if alert_type == "price":
+        embed.add_field(name="Soglia", value=f"{side} ≥ {target_value:.1f}%", inline=False)
+    elif alert_type == "profit":
+        embed.add_field(name="Soglia", value=f"Profitto ≥ {target_value:.1f}%", inline=False)
+    elif alert_type == "loss":
+        embed.add_field(name="Soglia", value=f"Perdita ≤ -{target_value:.1f}%", inline=False)
+    elif alert_type == "closing":
+        embed.add_field(name="Soglia", value="10 minuti prima dell'inizio della partita collegata.", inline=False)
+    else:
+        embed.add_field(name="Soglia", value="Quando il mercato viene risolto.", inline=False)
+
+    await ctx.send(embed=embed)
+
+
+@alert_group.command(name="remove", aliases=["delete", "rimuovi"])
+async def alert_remove(ctx, alert_id: int):
+    user_id = str(ctx.author.id)
+    c.execute("""
+        UPDATE personal_alerts
+        SET active=0,
+            triggered=1,
+            triggered_at=?
+        WHERE id=?
+          AND user_id=?
+          AND active=1
+    """, (datetime.now(timezone.utc).isoformat(), alert_id, user_id))
+    conn.commit()
+
+    if c.rowcount <= 0:
+        await ctx.send("❌ Alert non trovato o già disattivato.")
+        return
+
+    await ctx.send(f"🗑️ Alert #{alert_id} rimosso.")
+
+
+@alert_group.command(name="clear", aliases=["pulisci"])
+async def alert_clear(ctx):
+    user_id = str(ctx.author.id)
+    c.execute("""
+        UPDATE personal_alerts
+        SET active=0,
+            triggered=1,
+            triggered_at=?
+        WHERE user_id=?
+          AND active=1
+    """, (datetime.now(timezone.utc).isoformat(), user_id))
+    removed = c.rowcount
+    conn.commit()
+
+    await ctx.send(f"🧹 Alert attivi rimossi: **{removed}**.")
+
+
+@bot.command(name="alerts", aliases=["mieialert"])
+async def alerts_list(ctx):
+    user_id = str(ctx.author.id)
+    c.execute("""
+        SELECT a.id, a.market_id, a.alert_type, a.side, a.target_value, m.question
+        FROM personal_alerts a
+        JOIN markets m ON a.market_id=m.id
+        WHERE a.user_id=?
+          AND a.active=1
+          AND a.triggered=0
+        ORDER BY a.id DESC
+        LIMIT 15
+    """, (user_id,))
+    rows = c.fetchall()
+
+    if not rows:
+        await ctx.send("📭 Non hai alert personali attivi.")
+        return
+
+    embed = discord.Embed(
+        title="🔔 I tuoi alert attivi",
+        color=COLOR_GOLD
+    )
+
+    for alert_id, market_id, alert_type, side, target_value, question in rows:
+        if alert_type == "price":
+            rule = f"{side} ≥ {target_value:.1f}%"
+        elif alert_type == "profit":
+            rule = f"Profitto ≥ {target_value:.1f}%"
+        elif alert_type == "loss":
+            rule = f"Perdita ≤ -{target_value:.1f}%"
+        elif alert_type == "closing":
+            rule = "10 minuti prima dell'inizio"
+        else:
+            rule = "mercato risolto"
+
+        embed.add_field(
+            name=f"#{alert_id} • Mercato #{market_id} • {alert_type}",
+            value=f"{question[:120]}\n**Regola:** {rule}",
+            inline=False
+        )
+
+    embed.set_footer(text="Rimuovi con !alert remove ALERT_ID")
+    await ctx.send(embed=embed)
+
+
+
+# =========================
+# MARKETPLACE SYSTEM
+# =========================
+SHOP_CATEGORIES = {
+    "themes": {"emoji": "🎨", "name": "Temi embed", "command": "temi", "desc": "Temi cosmetici che modificano colore e stile degli embed personali: !profile, !portfolio e !balance."},
+    "titles": {"emoji": "🎖️", "name": "Titoli", "command": "titoli", "desc": "Etichette cosmetiche acquistabili, separate dallo Status di gioco. Appaiono sotto il nome nel profilo."},
+    "flairs": {"emoji": "💬", "name": "Frasi profilo", "command": "frasi", "desc": "Motti e frasi personali acquistabili. Appaiono sotto il Titolo nel profilo."},
+    "collectibles": {"emoji": "🏺", "name": "Collezionabili", "command": "collezionabili", "desc": "Oggetti da collezione acquistabili, separati dai badge vinti e visibili negli embed."},
+    "decorative": {"emoji": "🖼️", "name": "Immagini decorative", "command": "immagini", "desc": "Immagini decorative cosmetiche da mostrare negli embed personali tramite URL immagine."},
+    "crates": {"emoji": "📦", "name": "Casse", "command": "casse", "desc": "Casse cosmetiche da inventario. Nessun effetto gameplay."},
+}
+
+SHOP_CATEGORY_ALIASES = {
+    "temi": "themes", "tema": "themes", "theme": "themes", "themes": "themes", "embed": "themes", "embedthemes": "themes", "embed_themes": "themes",
+    "titoli": "titles", "titolo": "titles", "title": "titles", "titles": "titles",
+    "frasi": "flairs", "frase": "flairs", "flair": "flairs", "flairs": "flairs", "motti": "flairs", "motto": "flairs",
+    "collezionabili": "collectibles", "collezionabile": "collectibles", "collectible": "collectibles", "collectibles": "collectibles", "collezione": "collectibles",
+    "immagini": "decorative", "immagine": "decorative", "decorazioni": "decorative", "decorazione": "decorative", "decorative": "decorative", "decorative_images": "decorative", "images": "decorative",
+    "casse": "crates", "cassa": "crates", "crate": "crates", "crates": "crates",
+}
+
+SHOP_ITEMS = {
+    # Le categorie Temi embed, Titoli, Collezionabili e Immagini decorative sono state svuotate.
+    # Verranno riscritte con nuovi oggetti nella prossima fase del Marketplace.
+
+    # FRASI PROFILO
+    "flair_buy_the_dip": {"emoji": "💬", "name": "Buy the Dip", "category": "flairs", "slot": "flair", "price": 900, "rarity": "Comune", "new": True, "limited": False, "desc": "Frase profilo mostrata sotto il Titolo nel profilo."},
+    "flair_risk_manager": {"emoji": "💬", "name": "Gestisco il rischio, non la fortuna", "category": "flairs", "slot": "flair", "price": 1400, "rarity": "Non comune", "new": False, "limited": False, "desc": "Motto cosmetico per profilo e identità trader."},
+    "flair_mercato_parla": {"emoji": "💬", "name": "Il mercato parla", "category": "flairs", "slot": "flair", "price": 1100, "rarity": "Comune", "new": False, "limited": False, "desc": "Frase breve da mostrare nel profilo."},
+
+    # CASSE
+    "crate_basic": {"emoji": "📦", "name": "Cassa Base", "category": "crates", "slot": None, "price": 1000, "rarity": "Comune", "new": True, "limited": False, "desc": "Cassa cosmetica da inventario. Apertura premi da sviluppare in una fase successiva."},
+    "crate_premium": {"emoji": "🎁", "name": "Cassa Premium", "category": "crates", "slot": None, "price": 3000, "rarity": "Rara", "new": True, "limited": False, "desc": "Cassa cosmetica premium da inventario. Nessun vantaggio competitivo."},
+}
+
+EQUIPMENT_SLOTS = {
+    "theme": "Tema embed", "title": "Titolo", "flair": "Frase profilo", "collectible": "Collezionabile", "decorative": "Immagine decorativa",
+    "frame": "Tema embed legacy", "showcase": "Collezionabile legacy", "bundle": "Decorazione legacy",
+}
+
+
+def normalize_shop_category(category):
+    if not category:
+        return None
+
+    key = str(category).lower().strip()
+
+    aliases = {
+        "temi": "themes",
+        "tema": "themes",
+        "theme": "themes",
+        "themes": "themes",
+        "embed": "themes",
+        "embed_themes": "themes",
+        "titoli": "titles",
+        "titolo": "titles",
+        "title": "titles",
+        "titles": "titles",
+        "frasi": "flairs",
+        "frase": "flairs",
+        "frasi_profilo": "flairs",
+        "phrase": "flairs",
+        "phrases": "flairs",
+        "flair": "flairs",
+        "flairs": "flairs",
+        "collezionabili": "collectibles",
+        "collezionabile": "collectibles",
+        "collection": "collectibles",
+        "collectible": "collectibles",
+        "collectibles": "collectibles",
+        "immagini": "decorative",
+        "immagine": "decorative",
+        "decorazioni": "decorative",
+        "decorazione": "decorative",
+        "image": "decorative",
+        "images": "decorative",
+        "decorations": "decorative",
+        "casse": "crates",
+        "cassa": "crates",
+        "crate": "crates",
+        "crates": "crates",
+    }
+    return aliases.get(key, key)
+
+
+def get_shop_item(item_id):
+    return SHOP_ITEMS.get(str(item_id).lower().strip())
+
+
+def user_owns_item(user_id, item_id):
+    c.execute("SELECT quantity FROM user_inventory WHERE user_id=? AND item_id=?", (str(user_id), str(item_id)))
+    row = c.fetchone()
+    return bool(row and (row[0] or 0) > 0)
+
+
+def get_equipped_items(user_id):
+    c.execute("SELECT slot, item_id FROM user_equipment WHERE user_id=?", (str(user_id),))
+    equipped = {slot: item_id for slot, item_id in c.fetchall()}
+    if "theme" not in equipped and "frame" in equipped:
+        equipped["theme"] = equipped["frame"]
+    if "collectible" not in equipped and "showcase" in equipped:
+        equipped["collectible"] = equipped["showcase"]
+    if "decorative" not in equipped and "bundle" in equipped:
+        equipped["decorative"] = equipped["bundle"]
+    return equipped
+
+
+def get_equipped_item(user_id, slot):
+    equipped = get_equipped_items(user_id)
+    item_id = equipped.get(slot)
+    return SHOP_ITEMS.get(item_id) if item_id else None
+
+
+def get_equipped_items_text(user_id):
+    equipped = get_equipped_items(user_id)
+    lines = []
+    for slot in ["theme", "title", "flair", "collectible"]:
+        item_id = equipped.get(slot)
+        item = SHOP_ITEMS.get(item_id) if item_id else None
+        if item:
+            lines.append(f"**{EQUIPMENT_SLOTS.get(slot, slot)}:** {item.get('emoji', '🎛️')} {item.get('name', item_id)}")
+    return "\n".join(lines) if lines else "Nessun cosmetico equipaggiato."
+
+
+def get_purchased_collectibles_text(user_id, equipped_only=False):
+    if equipped_only:
+        item = get_equipped_item(user_id, "collectible")
+        return f"{item.get('emoji', '🎛️')} **{item.get('name', item_id)}**" if item else "Nessun collezionabile equipaggiato."
+    c.execute("""
+        SELECT item_id, quantity
+        FROM user_inventory
+        WHERE user_id=?
+        ORDER BY purchased_at DESC
+    """, (str(user_id),))
+    rows = c.fetchall()
+    lines = []
+    for item_id, quantity in rows:
+        item = SHOP_ITEMS.get(item_id)
+        if item and item.get("category") == "collectibles":
+            qty = f" x{quantity}" if quantity and quantity > 1 else ""
+            lines.append(f"{item.get('emoji', '🎛️')} **{item.get('name', item_id)}**{qty}")
+    return " • ".join(lines[:8]) if lines else "Nessun collezionabile acquistato."
+
+
+def get_profile_identity_lines(user_id):
+    title = get_equipped_item(user_id, "title")
+    flair = get_equipped_item(user_id, "flair")
+    lines = []
+    if title:
+        lines.append(f"🎖️ **{title['name']}**")
+    if flair:
+        lines.append(f"💬 _{flair['name']}_")
+    return "\n".join(lines)
+
+
+def get_cosmetic_style(user_id):
+    equipped = get_equipped_items(user_id)
+    style = {
+        "color": None,
+        "title_prefix": "",
+        "description_prefix": "",
+        "footer_suffix": "",
+        "author_suffix": "",
+        "title_line": "",
+        "flair_line": "",
+        "collectible": "",
+        "decorative_image_url": "",
+    }
+
+    theme_id = equipped.get("theme")
+    title_id = equipped.get("title")
+    flair_id = equipped.get("flair")
+    collectible_id = equipped.get("collectible")
+    decorative_id = equipped.get("decorative") or equipped.get("decoration")
+
+    if theme_id and theme_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[theme_id]
+        dyn_color = item.get("theme_color", item.get("color"))
+        if dyn_color is not None:
+            try:
+                style["color"] = int(dyn_color)
+            except Exception:
+                pass
+        if item.get("emoji"):
+            style["title_prefix"] = f"{item.get('emoji')} "
+
+    if title_id and title_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[title_id]
+        style["title_line"] = f"{item.get('emoji', '🎖️')} **{item.get('name', title_id)}**"
+
+    if flair_id and flair_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[flair_id]
+        style["flair_line"] = f"*{item.get('name', flair_id)}*"
+
+    if collectible_id and collectible_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[collectible_id]
+        style["collectible"] = f"{item.get('emoji', '🏺')} **{item.get('name', collectible_id)}**"
+
+    if decorative_id and decorative_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[decorative_id]
+        image_url = (
+            item.get("image_url")
+            or item.get("decorative_image_url")
+            or item.get("url")
+            or item.get("image")
+            or ""
+        )
+        if image_url:
+            style["decorative_image_url"] = str(image_url).strip()
+
+    lines = []
+    if style["title_line"]:
+        lines.append(style["title_line"])
+    if style["flair_line"]:
+        lines.append(style["flair_line"])
+    if lines:
+        style["description_prefix"] = "\n".join(lines) + "\n\n"
+
+    return style
+
+
+def apply_cosmetics_to_embed(embed, user_id, member=None, base_footer=None, show_collectible=True, show_decorative=True):
+    style = get_cosmetic_style(user_id)
+
+    if style["color"] is not None:
+        embed.color = discord.Color(style["color"])
+
+    if style["title_prefix"] and embed.title:
+        embed.title = f"{style['title_prefix']}{embed.title}"
+
+    if style["description_prefix"]:
+        embed.description = f"{style['description_prefix']}{embed.description or ''}"
+
+    # Niente lista completa degli oggetti equipaggiati.
+    # Resta solo la sezione del collezionabile.
+    if show_collectible and style["collectible"]:
+        embed.add_field(
+            name="🏺 Collezionabile equipaggiato",
+            value=style["collectible"][:1024],
+            inline=False
+        )
+
+    # Immagine decorativa a tutta larghezza in fondo all'embed.
+    if show_decorative and style.get("decorative_image_url"):
+        try:
+            embed.set_image(url=style["decorative_image_url"])
+        except Exception:
+            pass
+
+    if base_footer:
+        embed.set_footer(text=base_footer[:2048])
+
+    return embed
+
+
+def build_shop_item_line(item_id, item):
+    slot = EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario"
+    tags = []
+    if item.get("new"):
+        tags.append("🆕 Novità")
+    if item.get("limited"):
+        tags.append("⭐ Limitato")
+    tag_text = f" • {' • '.join(tags)}" if tags else ""
+    return f"`{item_id}`\n💰 {item.get('price', 0)} crediti • 🏷️ {item.get('rarity', '-')} • 🎛️ {slot}{tag_text}\n_{item.get('desc', item.get('description', ''))}_"
+
+
+@bot.command(name="shop", aliases=["marketplace", "negozio"])
+async def shop(ctx, category: str = None):
+    if not category:
+        embed = discord.Embed(title="🛒 Marketplace", description="Spendi i crediti solo in oggetti cosmetici. Nessun oggetto dà vantaggi nel trading.", color=COLOR_PURPLE)
+        for key, data in SHOP_CATEGORIES.items():
+            count = sum(1 for item in SHOP_ITEMS.values() if item.get("category") == key and not item.get("disabled", False))
+            embed.add_field(name=f"{data['emoji']} {data['name']}", value=f"{data['desc']}\n`!shop {data.get('command', key)}` • {count} oggetti", inline=False)
+        embed.set_footer(text="Comandi: !buyitem item_id • !inventory • !equip item_id • !unequip slot")
+        await ctx.send(embed=embed)
+        return
+    category = normalize_shop_category(category)
+    if category not in SHOP_CATEGORIES:
+        await ctx.send("❌ Categoria non valida. Usa `!shop` per vedere le 6 categorie disponibili.")
+        return
+    items = [(item_id, item) for item_id, item in SHOP_ITEMS.items() if item.get("category") == category and not item.get("disabled", False)]
+    data = SHOP_CATEGORIES[category]
+    embed = discord.Embed(title=f"{data['emoji']} {data['name']}", description=data["desc"], color=COLOR_PURPLE)
+    if not items:
+        embed.add_field(name="📭 Nessun oggetto", value="Questa categoria è vuota. Verrà riscritta con nuovi oggetti.", inline=False)
+    else:
+        for item_id, item in items[:12]:
+            embed.add_field(name=f"{item.get('emoji', '🎛️')} {item.get('name', item_id)}", value=build_shop_item_line(item_id, item), inline=False)
+    embed.set_footer(text="Acquista con !buyitem item_id")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="buyitem", aliases=["compraitem", "buycosmetic"])
+async def buyitem(ctx, item_id: str = None):
+    user_id = str(ctx.author.id)
+    if not item_id:
+        await ctx.send("❌ Devi indicare l'ID oggetto. Esempio: `!buyitem item_id`")
+        return
+    item_id = item_id.lower().strip()
+    item = get_shop_item(item_id)
+    if not item:
+        await ctx.send("❌ Oggetto non trovato. Usa `!shop` per vedere il Marketplace.")
+        return
+    if user_owns_item(user_id, item_id):
+        await ctx.send("❌ Possiedi già questo oggetto.")
+        return
+    balance = get_user(user_id)
+    price = int(item["price"])
+    if balance < price:
+        await ctx.send(f"❌ Crediti insufficienti. Prezzo: **{price}**, saldo: **{balance}**.")
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    c.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (price, user_id))
+    c.execute("""
+        INSERT INTO user_inventory (user_id, item_id, quantity, purchased_at)
+        VALUES (?, ?, 1, ?)
+    """, (user_id, item_id, now))
+    c.execute("""
+        INSERT INTO marketplace_purchases (user_id, item_id, price, purchased_at)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, item_id, price, now))
+    conn.commit()
+    record_wealth_snapshot(user_id)
+    embed = discord.Embed(title="✅ Acquisto completato", description=f"Hai acquistato {item.get('emoji', '🎛️')} **{item.get('name', item_id)}**.", color=COLOR_GREEN)
+    embed.add_field(name="Categoria", value=SHOP_CATEGORIES[item['category']]["name"], inline=True)
+    embed.add_field(name="💰 Prezzo", value=f"{price} crediti", inline=True)
+    embed.add_field(name="💳 Saldo residuo", value=str(get_user(user_id)), inline=True)
+    if item.get("slot"):
+        embed.add_field(name="🎛️ Equipaggia", value=f"`!equip {item_id}`", inline=False)
+    else:
+        embed.add_field(name="📦 Inventario", value="Questo oggetto resta in inventario e non si equipaggia direttamente.", inline=False)
+    embed.set_footer(text="Gli oggetti Marketplace sono solo cosmetici: nessun vantaggio competitivo.")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="inventory", aliases=["inventario", "items"])
+async def inventory(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    user_id = str(member.id)
+    c.execute("""
+        SELECT item_id, quantity, purchased_at
+        FROM user_inventory
+        WHERE user_id=?
+        ORDER BY purchased_at DESC
+    """, (user_id,))
+    rows = c.fetchall()
+    embed = discord.Embed(title=f"🎒 Inventario di {member.display_name}", color=discord.Color(0x95A5A6))
+    embed.set_thumbnail(url=member.display_avatar.url)
     if not rows:
         embed.add_field(name="📭 Vuoto", value="Nessun oggetto acquistato. Usa `!shop` per aprire il Marketplace.", inline=False)
     else:
