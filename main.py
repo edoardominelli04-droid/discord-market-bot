@@ -1748,7 +1748,7 @@ async def balance(ctx):
 
     embed = discord.Embed(
         title="💰 Saldo",
-        color=COLOR_BLUE
+        color=discord.Color(0x95A5A6)
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="Crediti disponibili", value=f"{bal}", inline=False)
@@ -2504,11 +2504,11 @@ async def portfolio(ctx):
 
     total_profit = total_value - total_invested
     total_profit_pct = 0 if total_invested == 0 else (total_profit / total_invested) * 100
-    color = COLOR_BLUE
+    color = 0x95A5A6
 
     embed = discord.Embed(
         title=f"💼 Portafoglio di {ctx.author.display_name}",
-        color=color
+        color=discord.Color(0x95A5A6)
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
     embed.add_field(name="💰 Saldo", value=f"{balance}", inline=True)
@@ -4464,7 +4464,8 @@ def get_profile_identity_lines(user_id):
 
 def get_cosmetic_style(user_id):
     equipped = get_equipped_items(user_id)
-    style = {"color": None, "title_prefix": "", "description_prefix": "", "footer_suffix": "", "author_suffix": "", "collectible": "", "decorative_image_url": ""}
+    style = {"color": None, "title_prefix": "", "description_prefix": "", "footer_suffix": "", "author_suffix": "", "collectible": "",
+        "decorative_image_url": "", "decorative_image_url": ""}
 
     theme_item = SHOP_ITEMS.get(equipped.get("theme")) if equipped.get("theme") else None
     if theme_item:
@@ -4488,6 +4489,27 @@ def get_cosmetic_style(user_id):
         image_url = decorative_item.get("image_url") or decorative_item.get("url") or decorative_item.get("image") or ""
         if image_url:
             style["decorative_image_url"] = str(image_url).strip()
+
+
+    # Temi Embed creati da Shop Admin: applicano davvero il colore agli embed personali.
+    if theme_id and theme_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[theme_id]
+        dyn_color = item.get("theme_color", item.get("color"))
+        if dyn_color is not None:
+            try:
+                style["color"] = int(dyn_color)
+            except Exception:
+                pass
+        if item.get("emoji"):
+            style["title_prefix"] += f"{item.get('emoji')} "
+
+    # Immagini decorative create da Shop Admin: appaiono come set_image nel profilo.
+    decoration_id = equipped.get("decoration")
+    if decoration_id and decoration_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[decoration_id]
+        image_url = item.get("image_url") or item.get("decorative_image_url")
+        if image_url:
+            style["decorative_image_url"] = image_url
 
     return style
 
@@ -4684,6 +4706,16 @@ async def unequip(ctx, slot: str = None):
 from discord.ext import commands
 
 
+
+
+# =========================
+# SHOP ADMIN CLEANUP v2.0.3
+# =========================
+def cleanup_default_shop_items():
+    """Rimuove oggetti predefiniti non più usati: le Frasi Profilo ora si creano da Discord."""
+    for item_id in list(SHOP_ITEMS.keys()):
+        if item_id.startswith("flair_"):
+            SHOP_ITEMS.pop(item_id, None)
 
 # =========================
 # SHOP ADMIN HELPERS
@@ -4949,12 +4981,57 @@ Richiede discord.py 2.x
 
 import discord
 
+
+def shop_admin_id_example(category):
+    examples = {
+        "embed_themes": "theme_name_embed",
+        "titles": "title_name",
+        "flairs": "phrase_name",
+        "collectibles": "collection_name",
+        "decorations": "image_name",
+        "crates": "crate_name",
+    }
+    return examples.get(category, "item_name")
+
 class CreateItemModal(discord.ui.Modal, title="➕ Crea nuovo oggetto"):
-    item_id = discord.ui.TextInput(label="ID", placeholder="theme_after_hours", max_length=50)
-    name = discord.ui.TextInput(label="Nome", max_length=50)
-    emoji = discord.ui.TextInput(label="Emoji", placeholder="🌌", max_length=5)
+    item_id = discord.ui.TextInput(label="ID oggetto", placeholder="theme_name_embed", max_length=60)
+    name = discord.ui.TextInput(label="Nome", placeholder="Nome oggetto", max_length=60)
+    emoji = discord.ui.TextInput(label="Emoji / URL immagine / Colore HEX", placeholder="🎨 oppure https://... oppure #95A5A6", required=False, max_length=220)
     price = discord.ui.TextInput(label="Prezzo", placeholder="2500", max_length=10)
-    rarity = discord.ui.TextInput(label="Rarità", placeholder="Comune")
+    rarity = discord.ui.TextInput(label="Rarità", placeholder="Comune / Rara / Epica / Leggendaria", max_length=30)
+
+    def __init__(self, category="embed_themes"):
+        self.category = category
+        super().__init__()
+
+        examples = {
+            "embed_themes": "theme_name_embed",
+            "titles": "title_name",
+            "flairs": "phrase_name",
+            "collectibles": "collection_name",
+            "decorations": "image_name",
+            "crates": "crate_name",
+        }
+
+        helper_labels = {
+            "embed_themes": ("Emoji / Colore HEX", "🌌 oppure #6C3FC9"),
+            "titles": ("Emoji titolo", "👑"),
+            "flairs": ("Lascia vuoto", "Non serve emoji per le frasi profilo"),
+            "collectibles": ("Emoji collezionabile", "🏆"),
+            "decorations": ("URL immagine", "https://.../immagine.png"),
+            "crates": ("Emoji cassa", "📦"),
+        }
+
+        self.item_id.placeholder = examples.get(category, "item_name")
+        label, placeholder = helper_labels.get(category, ("Emoji", "🎛️"))
+        self.emoji.label = label
+        self.emoji.placeholder = placeholder
+        if category == "flairs":
+            self.emoji.required = False
+        if category == "decorations":
+            self.emoji.required = True
+        if category == "embed_themes":
+            self.emoji.required = True
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -4964,24 +5041,73 @@ class CreateItemModal(discord.ui.Modal, title="➕ Crea nuovo oggetto"):
             return
 
         item_id = str(self.item_id.value).lower().strip()
+        extra_value = str(self.emoji.value or "").strip()
+
+        if self.category == "flairs":
+            emoji_value = "💬"
+            image_url = ""
+            theme_color = None
+        elif self.category == "decorations":
+            emoji_value = "🖼️"
+            image_url = extra_value
+            theme_color = None
+            if not image_url.startswith(("http://", "https://")):
+                await interaction.response.send_message("❌ Devi inserire un URL immagine valido.", ephemeral=True)
+                return
+        elif self.category == "embed_themes":
+            image_url = ""
+            emoji_value = "🎨"
+            theme_color = None
+            if extra_value.startswith("#"):
+                try:
+                    theme_color = int(extra_value.replace("#", ""), 16)
+                except Exception:
+                    await interaction.response.send_message("❌ Codice colore HEX non valido. Esempio: `#6C3FC9`.", ephemeral=True)
+                    return
+            elif extra_value.lower().startswith("0x"):
+                try:
+                    theme_color = int(extra_value, 16)
+                except Exception:
+                    await interaction.response.send_message("❌ Codice colore non valido. Esempio: `0x6C3FC9`.", ephemeral=True)
+                    return
+            else:
+                emoji_value = extra_value or "🎨"
+        else:
+            emoji_value = extra_value or "🎛️"
+            image_url = ""
+            theme_color = None
+
         ok = create_shop_item(
             item_id=item_id,
             name=str(self.name.value).strip(),
-            emoji=str(self.emoji.value).strip(),
+            emoji=emoji_value,
             price=price_value,
             rarity=str(self.rarity.value).strip(),
-            category=getattr(self, "category", "embed_themes"),
+            category=self.category,
             description=""
         )
 
-        if ok:
-            safe_save_shop_item(item_id)
-            await interaction.response.send_message(
-                f"✅ Oggetto creato e salvato: `{item_id}`. Ora comparirà anche in `!shop`.",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message("❌ ID già esistente.", ephemeral=True)
+        if not ok:
+            await interaction.response.send_message("❌ ID già esistente o prezzo non valido.", ephemeral=True)
+            return
+
+        if image_url:
+            SHOP_ITEMS[item_id]["image_url"] = image_url
+            SHOP_ITEMS[item_id]["decorative_image_url"] = image_url
+            SHOP_ITEMS[item_id]["desc"] = "Immagine decorativa per il profilo."
+            SHOP_ITEMS[item_id]["description"] = "Immagine decorativa per il profilo."
+
+        if theme_color is not None:
+            SHOP_ITEMS[item_id]["theme_color"] = theme_color
+            SHOP_ITEMS[item_id]["color"] = theme_color
+            SHOP_ITEMS[item_id]["desc"] = "Tema colore per gli embed personali."
+            SHOP_ITEMS[item_id]["description"] = "Tema colore per gli embed personali."
+
+        safe_save_shop_item(item_id)
+        await interaction.response.send_message(
+            f"✅ Oggetto creato e salvato: `{item_id}`. Ora comparirà anche in `!shop`.",
+            ephemeral=True
+        )
 
 
 class EditItemModal(discord.ui.Modal, title="✏️ Modifica oggetto"):
@@ -5145,6 +5271,8 @@ class ShopCategorySelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
 
         category = self.values[0]
+        if hasattr(self.view, "category"):
+            self.view.category = category
 
         embed = build_category_embed(category)
         await interaction.response.edit_message(
@@ -5155,8 +5283,9 @@ class ShopCategorySelect(discord.ui.Select):
 
 class ShopAdminView(discord.ui.View):
 
-    def __init__(self):
+    def __init__(self, category="embed_themes"):
         super().__init__(timeout=300)
+        self.category = category
 
         # Menu a tendina categorie
         self.add_item(ShopCategorySelect())
@@ -5206,7 +5335,7 @@ class ShopAdminView(discord.ui.View):
     ):
 
         await interaction.response.send_modal(
-            CreateItemModal()
+            CreateItemModal(getattr(self, "category", "embed_themes"))
         )
 
     # =========================
@@ -5354,6 +5483,7 @@ def toggle_shop_item(item_id):
 def create_shop_item(item_id, name, emoji, price, rarity,
                      category="embed_themes", description=""):
     item_id = str(item_id).lower().strip()
+    category = str(category).strip()
     if item_id in SHOP_ITEMS:
         return False
 
@@ -5371,15 +5501,24 @@ def create_shop_item(item_id, name, emoji, price, rarity,
         "crates": "crate",
     }
 
+    desc_by_category = {
+        "embed_themes": "Tema colore per gli embed personali.",
+        "titles": "Titolo cosmetico mostrato nel profilo.",
+        "flairs": "Frase profilo mostrata sotto il Titolo.",
+        "collectibles": "Collezionabile da esporre nel profilo.",
+        "decorations": "Immagine decorativa per il profilo.",
+        "crates": "Cassa Marketplace.",
+    }
+
     SHOP_ITEMS[item_id] = {
         "name": str(name).strip(),
-        "emoji": str(emoji).strip(),
+        "emoji": str(emoji).strip() if category != "flairs" else "💬",
         "price": price,
         "rarity": str(rarity).strip(),
-        "category": str(category).strip(),
-        "slot": slot_by_category.get(str(category).strip(), "misc"),
-        "desc": str(description).strip() or "Oggetto Marketplace.",
-        "description": str(description).strip() or "Oggetto Marketplace.",
+        "category": category,
+        "slot": slot_by_category.get(category, "misc"),
+        "desc": str(description).strip() or desc_by_category.get(category, "Oggetto Marketplace."),
+        "description": str(description).strip() or desc_by_category.get(category, "Oggetto Marketplace."),
         "disabled": False,
         "new": True,
         "limited": False
@@ -5426,7 +5565,9 @@ def init_shop_items_table():
     """)
     for statement in [
         "ALTER TABLE shop_items ADD COLUMN slot TEXT",
-        "ALTER TABLE shop_items ADD COLUMN desc TEXT"
+        "ALTER TABLE shop_items ADD COLUMN desc TEXT",
+        "ALTER TABLE shop_items ADD COLUMN image_url TEXT",
+        "ALTER TABLE shop_items ADD COLUMN theme_color INTEGER"
     ]:
         try:
             cur.execute(statement)
@@ -5447,8 +5588,8 @@ def save_shop_item(item_id):
     cur = local_conn.cursor()
     cur.execute(
         """INSERT OR REPLACE INTO shop_items
-        (item_id,name,emoji,category,price,rarity,description,disabled,is_new,limited,slot,desc)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (item_id,name,emoji,category,price,rarity,description,disabled,is_new,limited,slot,desc,image_url,theme_color)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             item_id,
             item.get("name",""),
@@ -5461,7 +5602,9 @@ def save_shop_item(item_id):
             int(item.get("new",False)),
             int(item.get("limited",False)),
             item.get("slot", ""),
-            item.get("desc", item.get("description", ""))
+            item.get("desc", item.get("description", "")),
+            item.get("image_url", item.get("decorative_image_url", "")),
+            item.get("theme_color", item.get("color", None))
         )
     )
     local_conn.commit()
@@ -5475,7 +5618,7 @@ def load_shop_items():
     cur = local_conn.cursor()
     try:
         rows = cur.execute("""
-            SELECT item_id,name,emoji,category,price,rarity,description,disabled,is_new,limited,slot,desc
+            SELECT item_id,name,emoji,category,price,rarity,description,disabled,is_new,limited,slot,desc,image_url,theme_color
             FROM shop_items
         """).fetchall()
     except sqlite3.OperationalError:
@@ -5484,7 +5627,7 @@ def load_shop_items():
     local_conn.close()
 
     for r in rows:
-        item_id, name, emoji, category, price, rarity, description, disabled, is_new, limited, slot, desc = r
+        item_id, name, emoji, category, price, rarity, description, disabled, is_new, limited, slot, desc, image_url, theme_color = r
         SHOP_ITEMS[item_id] = {
             "name": name,
             "emoji": emoji,
@@ -5505,6 +5648,12 @@ def load_shop_items():
                 "crates": "crate",
             }.get(category, "misc"),
         }
+        if image_url:
+            SHOP_ITEMS[item_id]["image_url"] = image_url
+            SHOP_ITEMS[item_id]["decorative_image_url"] = image_url
+        if theme_color is not None:
+            SHOP_ITEMS[item_id]["theme_color"] = int(theme_color)
+            SHOP_ITEMS[item_id]["color"] = int(theme_color)
 
 
 # =========================
@@ -6737,6 +6886,7 @@ async def on_member_join(member):
 async def on_ready():
     
     try:
+        cleanup_default_shop_items()
         init_shop_items_table()
         load_shop_items()  # Shop Admin persistence
     except Exception as e:
