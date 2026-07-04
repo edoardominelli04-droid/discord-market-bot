@@ -1,3 +1,41 @@
+import os
+import discord
+import sqlite3
+import requests
+import asyncio
+import html
+import re
+import matplotlib.pyplot as plt
+import io
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+
+plt.style.use("dark_background")
+plt.rcParams["font.family"] = "DejaVu Sans"
+plt.rcParams["axes.titleweight"] = "bold"
+plt.rcParams["axes.labelsize"] = 11
+
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+from discord.ext import commands
+
+try:
+    from scipy.interpolate import make_interp_spline
+except Exception:
+    make_interp_spline = None
+
+import numpy as np
+
+
+# =========================
+# TOKEN
+# =========================
+token = os.environ.get("DISCORD_TOKEN")
+
+# =========================
 # DISCORD SETUP
 # =========================
 intents = discord.Intents.default()
