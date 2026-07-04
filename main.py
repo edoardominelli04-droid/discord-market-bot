@@ -4709,7 +4709,71 @@ async def shopadmin(ctx):
 @shopadmin.command(name="items")
 @admin_only()
 async def shopadmin_items(ctx):
-    await ctx.send("📦 Gestione oggetti Marketplace.")
+
+    categories = [
+        ("embed_themes", "🎨 Temi Embed"),
+        ("titles", "🏷️ Titoli"),
+        ("flairs", "💬 Frasi Profilo"),
+        ("collectibles", "🏆 Collezionabili"),
+        ("decorations", "🖼️ Immagini Decorative"),
+        ("crates", "📦 Casse"),
+    ]
+
+    embed = discord.Embed(
+        title="🛠️ Shop Admin • Oggetti",
+        description="Panoramica completa degli oggetti presenti nel Marketplace.",
+        color=discord.Color.orange()
+    )
+
+    for category_id, category_name in categories:
+
+        items = [
+            item for item in SHOP_ITEMS.values()
+            if item.get("category") == category_id
+        ]
+
+        if not items:
+            embed.add_field(
+                name=f"{category_name} (0)",
+                value="Nessun oggetto.",
+                inline=False
+            )
+            continue
+
+        lines = []
+
+        items.sort(key=lambda x: (
+            x.get("rarity", ""),
+            x.get("price", 0)
+        ))
+
+        for item in items:
+
+            status = "🟢 Attivo"
+            if item.get("disabled", False):
+                status = "🔴 Disabilitato"
+
+            item_id = next(
+                (k for k, v in SHOP_ITEMS.items() if v == item),
+                "?"
+            )
+
+            price = "Gratuito" if item["price"] == 0 else f"{item['price']}"
+
+            lines.append(
+                f"{item['emoji']} **{item['name']}**\n"
+                f"`{item_id}`\n"
+                f"💰 {price} • 🏷️ {item['rarity']}\n"
+                f"{status}"
+            )
+
+        embed.add_field(
+            name=f"{category_name} ({len(items)})",
+            value="\n\n".join(lines)[:1024],
+            inline=False
+        )
+
+    await ctx.send(embed=embed)
 
 @shopadmin.command(name="additem")
 @admin_only()
