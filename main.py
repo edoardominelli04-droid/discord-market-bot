@@ -1,5 +1,6 @@
 import os
 import discord
+from discord import ui
 import sqlite3
 import requests
 import asyncio
@@ -4682,6 +4683,7 @@ async def unequip(ctx, slot: str = None):
 
 from discord.ext import commands
 
+
 @bot.group(name="shopadmin", invoke_without_command=True)
 @admin_only()
 async def shopadmin(ctx):
@@ -4709,71 +4711,12 @@ async def shopadmin(ctx):
 @shopadmin.command(name="items")
 @admin_only()
 async def shopadmin_items(ctx):
-
-    categories = [
-        ("embed_themes", "🎨 Temi Embed"),
-        ("titles", "🏷️ Titoli"),
-        ("flairs", "💬 Frasi Profilo"),
-        ("collectibles", "🏆 Collezionabili"),
-        ("decorations", "🖼️ Immagini Decorative"),
-        ("crates", "📦 Casse"),
-    ]
-
-    embed = discord.Embed(
-        title="🛠️ Shop Admin • Oggetti",
-        description="Panoramica completa degli oggetti presenti nel Marketplace.",
-        color=discord.Color.orange()
+    embed = build_shop_admin_home()
+    await ctx.send(
+        embed=embed,
+        view=ShopAdminView()
     )
 
-    for category_id, category_name in categories:
-
-        items = [
-            item for item in SHOP_ITEMS.values()
-            if item.get("category") == category_id
-        ]
-
-        if not items:
-            embed.add_field(
-                name=f"{category_name} (0)",
-                value="Nessun oggetto.",
-                inline=False
-            )
-            continue
-
-        lines = []
-
-        items.sort(key=lambda x: (
-            x.get("rarity", ""),
-            x.get("price", 0)
-        ))
-
-        for item in items:
-
-            status = "🟢 Attivo"
-            if item.get("disabled", False):
-                status = "🔴 Disabilitato"
-
-            item_id = next(
-                (k for k, v in SHOP_ITEMS.items() if v == item),
-                "?"
-            )
-
-            price = "Gratuito" if item["price"] == 0 else f"{item['price']}"
-
-            lines.append(
-                f"{item['emoji']} **{item['name']}**\n"
-                f"`{item_id}`\n"
-                f"💰 {price} • 🏷️ {item['rarity']}\n"
-                f"{status}"
-            )
-
-        embed.add_field(
-            name=f"{category_name} ({len(items)})",
-            value="\n\n".join(lines)[:1024],
-            inline=False
-        )
-
-    await ctx.send(embed=embed)
 
 @shopadmin.command(name="additem")
 @admin_only()
@@ -4829,6 +4772,493 @@ async def shopadmin_refresh(ctx):
 @admin_only()
 async def shopadmin_stats(ctx):
     await ctx.send("📊 Statistiche del Marketplace.")
+
+
+# =========================
+# SHOP ADMIN UI
+# =========================
+
+"""
+shop_admin_modals.py
+Modali base per il pannello Shop Admin.
+Richiede discord.py 2.x
+"""
+
+import discord
+
+class CreateItemModal(discord.ui.Modal, title="➕ Crea nuovo oggetto"):
+    item_id = discord.ui.TextInput(label="ID", placeholder="theme_after_hours", max_length=50)
+    name = discord.ui.TextInput(label="Nome", max_length=50)
+    emoji = discord.ui.TextInput(label="Emoji", placeholder="🌌", max_length=5)
+    price = discord.ui.TextInput(label="Prezzo", placeholder="2500", max_length=10)
+    rarity = discord.ui.TextInput(label="Rarità", placeholder="Comune")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "✅ Oggetto creato." if create_shop_item(self.item_id.value,self.name.value,self.emoji.value,self.price.value,self.rarity.value) else "❌ ID già esistente.",
+            ephemeral=True
+        )
+
+
+class EditItemModal(discord.ui.Modal, title="✏️ Modifica oggetto"):
+    item_id = discord.ui.TextInput(label="ID oggetto")
+    field = discord.ui.TextInput(label="Campo", placeholder="price, name, emoji...")
+    value = discord.ui.TextInput(label="Nuovo valore")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "✅ Oggetto modificato." if edit_shop_item(self.item_id.value,self.field.value,self.value.value) else "❌ Modifica non riuscita.",
+            ephemeral=True
+        )
+
+
+class SetPriceModal(discord.ui.Modal, title="💰 Modifica prezzo"):
+    item_id = discord.ui.TextInput(label="ID oggetto")
+    new_price = discord.ui.TextInput(label="Nuovo prezzo", placeholder="3500")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            int(self.new_price.value)
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Il prezzo deve essere numerico.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "✅ Prezzo aggiornato." if set_shop_item_price(self.item_id.value,self.new_price.value) else "❌ Oggetto non trovato.",
+            ephemeral=True
+        )
+
+
+class DisableItemModal(discord.ui.Modal, title="🚫 Attiva / Disattiva oggetto"):
+    item_id = discord.ui.TextInput(label="ID oggetto")
+    state = discord.ui.TextInput(
+        label="Stato",
+        placeholder="attiva oppure disabilita"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "✅ Stato aggiornato." if toggle_shop_item(self.item_id.value) else "❌ Oggetto non trovato.",
+            ephemeral=True
+        )
+
+class ShopCategorySelect(discord.ui.Select):
+
+    def __init__(self):
+
+        options = [
+
+            discord.SelectOption(
+                label="Temi Embed",
+                value="embed_themes",
+                emoji="🎨",
+                description="Gestisci i temi degli embed"
+            ),
+
+            discord.SelectOption(
+                label="Titoli",
+                value="titles",
+                emoji="🏷️",
+                description="Gestisci i titoli"
+            ),
+
+            discord.SelectOption(
+                label="Frasi Profilo",
+                value="flairs",
+                emoji="💬",
+                description="Gestisci le frasi profilo"
+            ),
+
+            discord.SelectOption(
+                label="Collezionabili",
+                value="collectibles",
+                emoji="🏆",
+                description="Gestisci i collezionabili"
+            ),
+
+            discord.SelectOption(
+                label="Immagini Decorative",
+                value="decorations",
+                emoji="🖼️",
+                description="Gestisci le immagini decorative"
+            ),
+
+            discord.SelectOption(
+                label="Casse",
+                value="crates",
+                emoji="📦",
+                description="Gestisci le casse"
+            )
+
+        ]
+
+        super().__init__(
+            placeholder="📂 Seleziona una categoria...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        category = self.values[0]
+
+        embed = build_category_embed(category)
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self.view
+        )
+        return
+
+        items = []
+
+        for item_id, item in SHOP_ITEMS.items():
+
+            if item.get("category") != category:
+                continue
+
+            stato = "🟢 Attivo"
+
+            if item.get("disabled", False):
+                stato = "🔴 Disabilitato"
+
+            prezzo = "Gratuito"
+
+            if item.get("price", 0) > 0:
+                prezzo = f"{item['price']} crediti"
+
+            items.append(
+                f"{item['emoji']} **{item['name']}**\n"
+                f"`{item_id}`\n"
+                f"💰 {prezzo}\n"
+                f"🏷️ {item['rarity']}\n"
+                f"{stato}"
+            )
+
+        if not items:
+
+            embed.add_field(
+                name="Oggetti",
+                value="Nessun oggetto presente.",
+                inline=False
+            )
+
+        else:
+
+            testo = "\n\n".join(items)
+
+            while len(testo) > 1024:
+                testo = testo[:-1]
+
+            embed.add_field(
+                name="Oggetti",
+                value=testo,
+                inline=False
+            )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self.view
+        )
+
+class ShopAdminView(discord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=300)
+
+        # Menu a tendina categorie
+        self.add_item(ShopCategorySelect())
+
+    # =========================
+    # HOME
+    # =========================
+
+    @discord.ui.button(
+        label="🏠 Home",
+        style=discord.ButtonStyle.primary,
+        row=0
+    )
+    async def home_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        embed = discord.Embed(
+            title="🛠️ Shop Admin",
+            description=(
+                "Benvenuto nel pannello amministratore.\n\n"
+                "Seleziona una categoria dal menu a tendina."
+            ),
+            color=discord.Color.orange()
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self
+        )
+
+    # =========================
+    # NUOVO OGGETTO
+    # =========================
+
+    @discord.ui.button(
+        label="➕ Nuovo",
+        style=discord.ButtonStyle.success,
+        row=1
+    )
+    async def new_item_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await interaction.response.send_modal(
+            CreateItemModal()
+        )
+
+    # =========================
+    # MODIFICA
+    # =========================
+
+    @discord.ui.button(
+        label="✏️ Modifica",
+        style=discord.ButtonStyle.secondary,
+        row=1
+    )
+    async def edit_item_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await interaction.response.send_modal(
+            EditItemModal()
+        )
+
+    # =========================
+    # ELIMINA
+    # =========================
+
+    @discord.ui.button(
+        label="🗑️ Elimina",
+        style=discord.ButtonStyle.danger,
+        row=1
+    )
+    async def delete_item_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await interaction.response.send_message(
+            "⚠️ Funzione non ancora implementata.",
+            ephemeral=True
+        )
+
+    # =========================
+    # PREZZO
+    # =========================
+
+    @discord.ui.button(
+        label="💰 Prezzo",
+        style=discord.ButtonStyle.secondary,
+        row=2
+    )
+    async def price_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await interaction.response.send_modal(
+            SetPriceModal()
+        )
+
+    # =========================
+    # ATTIVA / DISATTIVA
+    # =========================
+
+    @discord.ui.button(
+        label="🚫 Disabilita",
+        style=discord.ButtonStyle.secondary,
+        row=2
+    )
+    async def disable_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await interaction.response.send_modal(
+            DisableItemModal()
+        )
+
+    # =========================
+    # STATISTICHE
+    # =========================
+
+    @discord.ui.button(
+        label="📊 Statistiche",
+        style=discord.ButtonStyle.primary,
+        row=2
+    )
+    async def stats_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await interaction.response.send_message(
+            "📊 Statistiche Marketplace in arrivo.",
+            ephemeral=True
+        )
+
+
+
+# =========================
+# SHOP ADMIN LOGIC (BASE)
+# =========================
+
+def refresh_shop_admin_message(interaction, category):
+    \"\"\"Helper da richiamare dopo una modifica dello shop.\"\"\"
+    return build_category_embed(category)
+
+
+def shop_item_exists(item_id):
+    return item_id in SHOP_ITEMS
+
+
+def set_shop_item_price(item_id, new_price):
+    if item_id not in SHOP_ITEMS:
+        return False
+    SHOP_ITEMS[item_id]["price"] = int(new_price)
+    return True
+
+
+def toggle_shop_item(item_id):
+    if item_id not in SHOP_ITEMS:
+        return False
+    SHOP_ITEMS[item_id]["disabled"] = not SHOP_ITEMS[item_id].get("disabled", False)
+    return True
+
+
+def create_shop_item(item_id, name, emoji, price, rarity,
+                     category="embed_themes", description=""):
+    if item_id in SHOP_ITEMS:
+        return False
+
+    SHOP_ITEMS[item_id] = {
+        "name": name,
+        "emoji": emoji,
+        "price": int(price),
+        "rarity": rarity,
+        "category": category,
+        "description": description,
+        "disabled": False,
+        "new": True,
+        "limited": False
+    }
+    return True
+
+
+def edit_shop_item(item_id, field, value):
+    if item_id not in SHOP_ITEMS:
+        return False
+
+    if field not in SHOP_ITEMS[item_id]:
+        return False
+
+    if field == "price":
+        value = int(value)
+
+    SHOP_ITEMS[item_id][field] = value
+    return True
+
+
+# =========================
+# SQLITE PERSISTENCE (BASE)
+# =========================
+
+import sqlite3
+
+def init_shop_items_table():
+    conn = sqlite3.connect("market.db")
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_items(
+        item_id TEXT PRIMARY KEY,
+        name TEXT,
+        emoji TEXT,
+        category TEXT,
+        price INTEGER,
+        rarity TEXT,
+        description TEXT,
+        disabled INTEGER DEFAULT 0,
+        is_new INTEGER DEFAULT 1,
+        limited INTEGER DEFAULT 0
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_shop_item(item_id):
+    if item_id not in SHOP_ITEMS:
+        return
+    item = SHOP_ITEMS[item_id]
+    conn = sqlite3.connect("market.db")
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT OR REPLACE INTO shop_items
+        (item_id,name,emoji,category,price,rarity,description,disabled,is_new,limited)
+        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            item_id,
+            item.get("name",""),
+            item.get("emoji",""),
+            item.get("category",""),
+            item.get("price",0),
+            item.get("rarity",""),
+            item.get("description",""),
+            int(item.get("disabled",False)),
+            int(item.get("new",False)),
+            int(item.get("limited",False))
+        )
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_shop_items():
+    conn = sqlite3.connect("market.db")
+    cur = conn.cursor()
+    try:
+        rows = cur.execute("SELECT * FROM shop_items").fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return
+    conn.close()
+    for r in rows:
+        SHOP_ITEMS[r[0]] = {
+            "name": r[1],
+            "emoji": r[2],
+            "category": r[3],
+            "price": r[4],
+            "rarity": r[5],
+            "description": r[6],
+            "disabled": bool(r[7]),
+            "new": bool(r[8]),
+            "limited": bool(r[9]),
+        }
+
+async def refresh_view(interaction, category):
+    await interaction.edit_original_response(
+        embed=build_category_embed(category),
+        view=ShopAdminView()
 
 
 # =========================
