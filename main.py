@@ -4684,6 +4684,106 @@ async def unequip(ctx, slot: str = None):
 from discord.ext import commands
 
 
+
+# =========================
+# SHOP ADMIN HELPERS
+# =========================
+
+SHOP_ADMIN_CATEGORIES = [
+    ("embed_themes", "🎨 Temi Embed"),
+    ("titles", "🏷️ Titoli"),
+    ("flairs", "💬 Frasi Profilo"),
+    ("collectibles", "🏆 Collezionabili"),
+    ("decorations", "🖼️ Immagini Decorative"),
+    ("crates", "📦 Casse"),
+]
+
+def build_shop_admin_home():
+    embed = discord.Embed(
+        title="🛠️ Shop Admin",
+        description=(
+            "Pannello amministratore Marketplace.\n\n"
+            "Usa il menu a tendina per sfogliare le categorie oppure i sottocomandi testuali."
+        ),
+        color=discord.Color.orange()
+    )
+    embed.add_field(
+        name="📂 Categorie",
+        value="\n".join(f"{label}" for _, label in SHOP_ADMIN_CATEGORIES),
+        inline=False
+    )
+    embed.add_field(
+        name="⌨️ Comandi rapidi",
+        value=(
+            "`!shopadmin items`\n"
+            "`!shopadmin setprice <item_id> <prezzo>`\n"
+            "`!shopadmin disableitem <item_id>`\n"
+            "`!shopadmin removeitem <item_id>`\n"
+            "`!shopadmin stats`"
+        ),
+        inline=False
+    )
+    return embed
+
+def build_category_embed(category):
+    categories = dict(SHOP_ADMIN_CATEGORIES)
+    label = categories.get(category, category)
+
+    embed = discord.Embed(
+        title=f"🛠️ Shop Admin • {label}",
+        color=discord.Color.orange()
+    )
+
+    items = [
+        (item_id, item)
+        for item_id, item in SHOP_ITEMS.items()
+        if item.get("category") == category
+    ]
+
+    if not items:
+        embed.description = "Nessun oggetto presente in questa categoria."
+        return embed
+
+    def sort_key(pair):
+        item_id, item = pair
+        return (str(item.get("rarity", "")), int(item.get("price", 0) or 0), item_id)
+
+    for item_id, item in sorted(items, key=sort_key)[:20]:
+        stato = "🔴 Disabilitato" if item.get("disabled", False) else "🟢 Attivo"
+        prezzo = "Gratuito" if int(item.get("price", 0) or 0) == 0 else f"{item.get('price', 0)} crediti"
+        embed.add_field(
+            name=f"{item.get('emoji', '🎛️')} {item.get('name', item_id)}",
+            value=(
+                f"`{item_id}`\n"
+                f"💰 {prezzo}\n"
+                f"🏷️ {item.get('rarity', '-')}\n"
+                f"{stato}"
+            )[:1024],
+            inline=False
+        )
+
+    if len(items) > 20:
+        embed.set_footer(text=f"Mostrati 20 oggetti su {len(items)}.")
+    return embed
+
+def build_all_items_admin_embed():
+    embed = discord.Embed(
+        title="🛠️ Shop Admin • Oggetti",
+        description="Panoramica sintetica del Marketplace.",
+        color=discord.Color.orange()
+    )
+    for category_id, category_name in SHOP_ADMIN_CATEGORIES:
+        count = sum(1 for item in SHOP_ITEMS.values() if item.get("category") == category_id)
+        embed.add_field(name=category_name, value=f"{count} oggetti", inline=True)
+    return embed
+
+def safe_save_shop_item(item_id):
+    try:
+        if "save_shop_item" in globals():
+            save_shop_item(item_id)
+    except Exception as e:
+        print(f"[SHOP ADMIN] Errore salvataggio {item_id}: {e}")
+
 @bot.group(name="shopadmin", invoke_without_command=True)
 @admin_only()
 async def shopadmin(ctx):
@@ -4711,37 +4811,82 @@ async def shopadmin(ctx):
 @shopadmin.command(name="items")
 @admin_only()
 async def shopadmin_items(ctx):
-    embed = build_shop_admin_home()
-    await ctx.send(
-        embed=embed,
-        view=ShopAdminView()
-    )
-
+    try:
+        await ctx.send(
+            embed=build_shop_admin_home(),
+            view=ShopAdminView()
+        )
+    except Exception as e:
+        await ctx.send(f"❌ Errore apertura pannello Shop Admin: `{e}`")
 
 @shopadmin.command(name="additem")
 @admin_only()
-async def shopadmin_additem(ctx):
-    await ctx.send("➕ Creazione nuovo oggetto.")
+async def shopadmin_additem(ctx, item_id: str, category: str, emoji: str, price: int, rarity: str, *, name: str):
+    item_id = item_id.lower().strip()
+    category = category.lower().strip()
+    if category not in dict(SHOP_ADMIN_CATEGORIES):
+        await ctx.send("❌ Categoria non valida.")
+        return
+    if price < 0:
+        await ctx.send("❌ Prezzo non valido.")
+        return
+    ok = create_shop_item(item_id, name, emoji, price, rarity, category=category, description="")
+    if ok:
+        safe_save_shop_item(item_id)
+        await ctx.send(f"✅ Oggetto creato: `{item_id}`")
+    else:
+        await ctx.send("❌ ID già esistente.")
 
 @shopadmin.command(name="edititem")
 @admin_only()
-async def shopadmin_edititem(ctx):
-    await ctx.send("✏️ Modifica oggetto.")
+async def shopadmin_edititem(ctx, item_id: str, field: str, *, value: str):
+    item_id = item_id.lower().strip()
+    field = field.strip()
+    ok = edit_shop_item(item_id, field, value)
+    if ok:
+        safe_save_shop_item(item_id)
+        await ctx.send(f"✅ Oggetto modificato: `{item_id}` → `{field}`")
+    else:
+        await ctx.send("❌ Modifica non riuscita. Controlla ID e campo.")
 
 @shopadmin.command(name="removeitem")
 @admin_only()
-async def shopadmin_removeitem(ctx):
-    await ctx.send("🗑️ Rimozione oggetto.")
+async def shopadmin_removeitem(ctx, item_id: str):
+    item_id = item_id.lower().strip()
+    if item_id not in SHOP_ITEMS:
+        await ctx.send("❌ Oggetto non trovato.")
+        return
+    SHOP_ITEMS.pop(item_id, None)
+    try:
+        c.execute("DELETE FROM shop_items WHERE item_id=?", (item_id,))
+        conn.commit()
+    except Exception:
+        pass
+    await ctx.send(f"🗑️ Oggetto rimosso: `{item_id}`")
 
 @shopadmin.command(name="disableitem")
 @admin_only()
-async def shopadmin_disableitem(ctx):
-    await ctx.send("🚫 Oggetto disabilitato.")
+async def shopadmin_disableitem(ctx, item_id: str):
+    item_id = item_id.lower().strip()
+    if toggle_shop_item(item_id):
+        safe_save_shop_item(item_id)
+        stato = "disabilitato" if SHOP_ITEMS[item_id].get("disabled") else "attivato"
+        await ctx.send(f"✅ Oggetto `{item_id}` {stato}.")
+    else:
+        await ctx.send("❌ Oggetto non trovato.")
 
 @shopadmin.command(name="setprice")
 @admin_only()
-async def shopadmin_setprice(ctx):
-    await ctx.send("💰 Prezzo dell'oggetto aggiornato.")
+async def shopadmin_setprice(ctx, item_id: str, new_price: int):
+    item_id = item_id.lower().strip()
+    if new_price < 0:
+        await ctx.send("❌ Prezzo non valido.")
+        return
+    if set_shop_item_price(item_id, new_price):
+        safe_save_shop_item(item_id)
+        await ctx.send(f"💰 Prezzo aggiornato: `{item_id}` → **{new_price} crediti**")
+    else:
+        await ctx.send("❌ Oggetto non trovato.")
 
 @shopadmin.command(name="bundles")
 @admin_only()
@@ -4766,12 +4911,30 @@ async def shopadmin_gift(ctx):
 @shopadmin.command(name="refresh")
 @admin_only()
 async def shopadmin_refresh(ctx):
-    await ctx.send("🔄 Marketplace aggiornato.")
+    try:
+        init_shop_items_table()
+        load_shop_items()
+        await ctx.send("🔄 Marketplace ricaricato da SQLite.")
+    except Exception as e:
+        await ctx.send(f"❌ Errore refresh Marketplace: `{e}`")
 
 @shopadmin.command(name="stats")
 @admin_only()
 async def shopadmin_stats(ctx):
-    await ctx.send("📊 Statistiche del Marketplace.")
+    total = len(SHOP_ITEMS)
+    disabled = sum(1 for i in SHOP_ITEMS.values() if i.get("disabled"))
+    by_cat = []
+    for category_id, category_name in SHOP_ADMIN_CATEGORIES:
+        count = sum(1 for i in SHOP_ITEMS.values() if i.get("category") == category_id)
+        by_cat.append(f"{category_name}: **{count}**")
+    embed = discord.Embed(
+        title="📊 Statistiche Marketplace",
+        description="\n".join(by_cat),
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="Totale oggetti", value=str(total), inline=True)
+    embed.add_field(name="Disabilitati", value=str(disabled), inline=True)
+    await ctx.send(embed=embed)
 
 
 # =========================
@@ -4795,7 +4958,7 @@ class CreateItemModal(discord.ui.Modal, title="➕ Crea nuovo oggetto"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.send_message(
-            "✅ Oggetto creato." if create_shop_item(self.item_id.value,self.name.value,self.emoji.value,self.price.value,self.rarity.value) else "❌ ID già esistente.",
+            ("✅ Oggetto creato." if create_shop_item(self.item_id.value,self.name.value,self.emoji.value,self.price.value,self.rarity.value) else "❌ ID già esistente."),
             ephemeral=True
         )
 
@@ -4912,57 +5075,6 @@ class ShopCategorySelect(discord.ui.Select):
             view=self.view
         )
         return
-
-        items = []
-
-        for item_id, item in SHOP_ITEMS.items():
-
-            if item.get("category") != category:
-                continue
-
-            stato = "🟢 Attivo"
-
-            if item.get("disabled", False):
-                stato = "🔴 Disabilitato"
-
-            prezzo = "Gratuito"
-
-            if item.get("price", 0) > 0:
-                prezzo = f"{item['price']} crediti"
-
-            items.append(
-                f"{item['emoji']} **{item['name']}**\n"
-                f"`{item_id}`\n"
-                f"💰 {prezzo}\n"
-                f"🏷️ {item['rarity']}\n"
-                f"{stato}"
-            )
-
-        if not items:
-
-            embed.add_field(
-                name="Oggetti",
-                value="Nessun oggetto presente.",
-                inline=False
-            )
-
-        else:
-
-            testo = "\n\n".join(items)
-
-            while len(testo) > 1024:
-                testo = testo[:-1]
-
-            embed.add_field(
-                name="Oggetti",
-                value=testo,
-                inline=False
-            )
-
-        await interaction.response.edit_message(
-            embed=embed,
-            view=self.view
-        )
 
 class ShopAdminView(discord.ui.View):
 
@@ -5186,7 +5298,7 @@ def edit_shop_item(item_id, field, value):
 import sqlite3
 
 def init_shop_items_table():
-    conn = sqlite3.connect("market.db")
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shop_items(
@@ -5210,7 +5322,7 @@ def save_shop_item(item_id):
     if item_id not in SHOP_ITEMS:
         return
     item = SHOP_ITEMS[item_id]
-    conn = sqlite3.connect("market.db")
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
     cur.execute(
         """INSERT OR REPLACE INTO shop_items
@@ -5234,7 +5346,7 @@ def save_shop_item(item_id):
 
 
 def load_shop_items():
-    conn = sqlite3.connect("market.db")
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
     try:
         rows = cur.execute("SELECT * FROM shop_items").fetchall()
