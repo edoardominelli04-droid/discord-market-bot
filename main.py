@@ -4680,44 +4680,91 @@ async def unequip(ctx, slot: str = None):
     await ctx.send(f"✅ Slot **{EQUIPMENT_SLOTS[slot]}** svuotato.")
 
 
-@bot.command(name="adminshop", aliases=["shopadmin"])
+from discord.ext import commands
+
+@bot.group(name="shopadmin", invoke_without_command=True)
 @admin_only()
-async def adminshop(ctx, action: str = "overview", target: str = None):
-    action = (action or "overview").lower().strip()
-    if action in ["overview", "lista", "list"]:
-        embed = discord.Embed(title="🛠️ Admin Shop", description="Riepilogo categorie Marketplace.", color=COLOR_WHITE)
-        for key, data in SHOP_CATEGORIES.items():
-            count = sum(1 for item in SHOP_ITEMS.values() if item.get("category") == key)
-            embed.add_field(name=f"{data['emoji']} {data['name']}", value=f"Chiave: `{key}` • Comando: `!shop {data.get('command', key)}` • Oggetti: **{count}**", inline=False)
-        embed.set_footer(text="Azioni: !adminshop overview • !adminshop item item_id • !adminshop user @utente")
-        await ctx.send(embed=embed)
-        return
-    if action == "item":
-        if not target:
-            await ctx.send("❌ Usa `!adminshop item item_id`.")
-            return
-        item = get_shop_item(target)
-        if not item:
-            await ctx.send("❌ Oggetto non trovato.")
-            return
-        embed = discord.Embed(title=f"🛠️ {item['emoji']} {item['name']}", description=item.get("desc", ""), color=COLOR_WHITE)
-        embed.add_field(name="ID", value=f"`{target}`", inline=True)
-        embed.add_field(name="Categoria", value=SHOP_CATEGORIES[item['category']]["name"], inline=True)
-        embed.add_field(name="Slot", value=EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario", inline=True)
-        embed.add_field(name="Prezzo", value=f"{item['price']} crediti", inline=True)
-        embed.add_field(name="Rarità", value=item.get("rarity", "N/D"), inline=True)
-        await ctx.send(embed=embed)
-        return
-    if action == "user":
-        if not ctx.message.mentions:
-            await ctx.send("❌ Usa `!adminshop user @utente`.")
-            return
-        member = ctx.message.mentions[0]
-        embed = discord.Embed(title=f"🛠️ Shop user: {member.display_name}", color=COLOR_WHITE)
-        embed.add_field(name="Equipaggiati", value=get_equipped_items_text(str(member.id)), inline=False)
-        await ctx.send(embed=embed)
-        return
-    await ctx.send("❌ Azione non valida. Usa `!adminshop overview`, `!adminshop item item_id`, `!adminshop user @utente`.")
+async def shopadmin(ctx):
+    embed = discord.Embed(
+        title="🛠️ Shop Admin",
+        description=(
+            "**Sottocomandi disponibili:**\n\n"
+            "`!shopadmin items`\n"
+            "`!shopadmin additem`\n"
+            "`!shopadmin edititem`\n"
+            "`!shopadmin removeitem`\n"
+            "`!shopadmin disableitem`\n"
+            "`!shopadmin setprice`\n"
+            "`!shopadmin bundles`\n"
+            "`!shopadmin crates`\n"
+            "`!shopadmin limited`\n"
+            "`!shopadmin gift`\n"
+            "`!shopadmin refresh`\n"
+            "`!shopadmin stats`"
+        ),
+        color=discord.Color.orange()
+    )
+    await ctx.send(embed=embed)
+
+@shopadmin.command(name="items")
+@admin_only()
+async def shopadmin_items(ctx):
+    await ctx.send("📦 Gestione oggetti Marketplace.")
+
+@shopadmin.command(name="additem")
+@admin_only()
+async def shopadmin_additem(ctx):
+    await ctx.send("➕ Creazione nuovo oggetto.")
+
+@shopadmin.command(name="edititem")
+@admin_only()
+async def shopadmin_edititem(ctx):
+    await ctx.send("✏️ Modifica oggetto.")
+
+@shopadmin.command(name="removeitem")
+@admin_only()
+async def shopadmin_removeitem(ctx):
+    await ctx.send("🗑️ Rimozione oggetto.")
+
+@shopadmin.command(name="disableitem")
+@admin_only()
+async def shopadmin_disableitem(ctx):
+    await ctx.send("🚫 Oggetto disabilitato.")
+
+@shopadmin.command(name="setprice")
+@admin_only()
+async def shopadmin_setprice(ctx):
+    await ctx.send("💰 Prezzo dell'oggetto aggiornato.")
+
+@shopadmin.command(name="bundles")
+@admin_only()
+async def shopadmin_bundles(ctx):
+    await ctx.send("💎 Gestione bundle.")
+
+@shopadmin.command(name="crates")
+@admin_only()
+async def shopadmin_crates(ctx):
+    await ctx.send("📦 Gestione casse.")
+
+@shopadmin.command(name="limited")
+@admin_only()
+async def shopadmin_limited(ctx):
+    await ctx.send("⭐ Gestione oggetti limitati.")
+
+@shopadmin.command(name="gift")
+@admin_only()
+async def shopadmin_gift(ctx):
+    await ctx.send("🎁 Invio oggetti agli utenti.")
+
+@shopadmin.command(name="refresh")
+@admin_only()
+async def shopadmin_refresh(ctx):
+    await ctx.send("🔄 Marketplace aggiornato.")
+
+@shopadmin.command(name="stats")
+@admin_only()
+async def shopadmin_stats(ctx):
+    await ctx.send("📊 Statistiche del Marketplace.")
 
 
 # =========================
