@@ -1743,7 +1743,8 @@ async def ping(ctx):
 
 @bot.command(aliases=["saldo"])
 async def balance(ctx):
-    bal = get_user(str(ctx.author.id))
+    user_id = str(ctx.author.id)
+    bal = get_user(user_id)
 
     embed = discord.Embed(
         title="💰 Saldo",
@@ -1751,6 +1752,7 @@ async def balance(ctx):
     )
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
     embed.add_field(name="Crediti disponibili", value=f"{bal}", inline=False)
+    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !saldo")
 
     await ctx.send(embed=embed)
 
@@ -2503,7 +2505,7 @@ async def portfolio(ctx):
 
     total_profit = total_value - total_invested
     total_profit_pct = 0 if total_invested == 0 else (total_profit / total_invested) * 100
-    color = COLOR_BLUE
+    color = COLOR_GREY
 
     embed = discord.Embed(
         title=f"💼 Portafoglio di {ctx.author.display_name}",
@@ -2671,12 +2673,16 @@ async def profile(ctx):
     rank = calculate_server_rank(user_id)
     rank_text = f"#{rank}" if rank else "N/D"
 
-    color = COLOR_BLUE
+    color = COLOR_GREY
     profit_emoji = "🟢" if open_profit >= 0 else "🔴"
 
+    status_emoji = get_status_emoji_from_level(trader_level)
+    identity_lines = get_profile_identity_lines(user_id)
+    profile_description = identity_lines + ("\n\n" if identity_lines else "") + "Scheda personale del trader"
+
     embed = discord.Embed(
-        title=f"👤 Profilo di {ctx.author.display_name} • {trader_level}",
-        description="Scheda personale del trader",
+        title=f"👤 Profilo di {ctx.author.display_name} {status_emoji}",
+        description=profile_description,
         color=color
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
@@ -2705,10 +2711,11 @@ async def profile(ctx):
     badge_text = " • ".join(format_badge(b) for b in badge_ids[:12]) if badge_ids else "Nessun badge sbloccato."
     if len(badge_text) > 1024:
         badge_text = badge_text[:1000] + "..."
-    embed.add_field(name="🏅 Badge", value=badge_text, inline=False)
-    embed.add_field(name="🎨 Marketplace", value=get_equipped_items_text(user_id), inline=False)
+    embed.add_field(name="🏅 Badge vinti", value=badge_text, inline=False)
+    embed.add_field(name="🏺 Collezionabili acquistati", value=get_purchased_collectibles_text(user_id), inline=False)
+    embed.add_field(name="🎨 Marketplace equipaggiato", value=get_equipped_items_text(user_id), inline=False)
 
-    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo")
+    apply_cosmetics_to_embed(embed, user_id, ctx.author, "Comando disponibile anche come !profilo", show_collectible=False)
 
     await ctx.send(embed=embed)
 
@@ -4348,40 +4355,189 @@ async def alerts_list(ctx):
 # MARKETPLACE SYSTEM
 # =========================
 SHOP_CATEGORIES = {
-    "themes": {"emoji": "🎨", "name": "Temi embed", "command": "temi", "desc": "Temi cosmetici che modificano colore e stile degli embed personali: !profile, !portfolio e !balance."},
-    "titles": {"emoji": "🎖️", "name": "Titoli", "command": "titoli", "desc": "Etichette cosmetiche acquistabili, separate dallo Status di gioco. Appaiono sotto il nome nel profilo."},
-    "flairs": {"emoji": "💬", "name": "Frasi profilo", "command": "frasi", "desc": "Motti e frasi personali acquistabili. Appaiono sotto il Titolo nel profilo."},
-    "collectibles": {"emoji": "🏺", "name": "Collezionabili", "command": "collezionabili", "desc": "Oggetti da collezione acquistabili, separati dai badge vinti e visibili negli embed."},
-    "decorative": {"emoji": "🖼️", "name": "Immagini decorative", "command": "immagini", "desc": "Immagini decorative cosmetiche da mostrare negli embed personali tramite URL immagine."},
-    "crates": {"emoji": "📦", "name": "Casse", "command": "casse", "desc": "Casse cosmetiche da inventario. Nessun effetto gameplay."},
+    "themes": {
+        "emoji": "🎨",
+        "name": "Embed Themes",
+        "desc": "Temi che cambiano colore e stile degli embed personali: !profile, !portfolio, !balance e leaderboard."
+    },
+    "titles": {
+        "emoji": "🎖️",
+        "name": "Titles",
+        "desc": "Etichette cosmetiche acquistabili, separate dallo Status di gioco. Appaiono sotto il nome nel profilo."
+    },
+    "flairs": {
+        "emoji": "💬",
+        "name": "Flairs",
+        "desc": "Motti e frasi personali acquistabili. Appaiono sotto il Title nel profilo."
+    },
+    "collectibles": {
+        "emoji": "🏺",
+        "name": "Collectibles",
+        "desc": "Pezzi da collezione acquistabili, separati dai badge vinti e visibili negli embed."
+    },
+    "decorative": {
+        "emoji": "🖼️",
+        "name": "Decorative Images",
+        "desc": "Elementi decorativi cosmetici per arricchire gli embed personali, senza vantaggi gameplay."
+    },
+    "crates": {
+        "emoji": "📦",
+        "name": "Crates",
+        "desc": "Casse cosmetiche da inventario. Nessun effetto gameplay."
+    },
 }
 
 SHOP_CATEGORY_ALIASES = {
-    "temi": "themes", "tema": "themes", "theme": "themes", "themes": "themes", "embed": "themes", "embedthemes": "themes", "embed_themes": "themes",
-    "titoli": "titles", "titolo": "titles", "title": "titles", "titles": "titles",
-    "frasi": "flairs", "frase": "flairs", "flair": "flairs", "flairs": "flairs", "motti": "flairs", "motto": "flairs",
-    "collezionabili": "collectibles", "collezionabile": "collectibles", "collectible": "collectibles", "collectibles": "collectibles", "collezione": "collectibles",
-    "immagini": "decorative", "immagine": "decorative", "decorazioni": "decorative", "decorazione": "decorative", "decorative": "decorative", "decorative_images": "decorative", "images": "decorative",
-    "casse": "crates", "cassa": "crates", "crate": "crates", "crates": "crates",
+    "theme": "themes", "themes": "themes", "temi": "themes", "tema": "themes", "embedthemes": "themes",
+    "title": "titles", "titles": "titles", "titoli": "titles", "titolo": "titles",
+    "flair": "flairs", "flairs": "flairs", "motti": "flairs", "motto": "flairs",
+    "collectible": "collectibles", "collectibles": "collectibles", "collezionabili": "collectibles", "collezione": "collectibles",
+    "decorative": "decorative", "decorative_images": "decorative", "images": "decorative", "immagini": "decorative", "decorazioni": "decorative",
+    "crate": "crates", "crates": "crates", "casse": "crates", "cassa": "crates",
 }
 
 SHOP_ITEMS = {
-    # Le categorie Temi embed, Titoli, Collezionabili e Immagini decorative sono state svuotate.
-    # Verranno riscritte con nuovi oggetti nella prossima fase del Marketplace.
+    # EMBED THEMES
+    "theme_dark_exchange": {
+        "emoji": "🌑", "name": "Dark Exchange", "category": "themes", "slot": "theme",
+        "price": 1500, "rarity": "Non comune", "new": True, "limited": False,
+        "desc": "Tema scuro da piattaforma trading. Cambia il colore degli embed personali.",
+        "color": COLOR_PURPLE,
+    },
+    "theme_stadium": {
+        "emoji": "🏟️", "name": "Stadium Lights", "category": "themes", "slot": "theme",
+        "price": 1800, "rarity": "Non comune", "new": False, "limited": False,
+        "desc": "Tema ispirato alle luci dello stadio. Visibile su profilo, portafoglio, saldo e classifica.",
+        "color": COLOR_CYAN,
+    },
+    "theme_profit_green": {
+        "emoji": "🟢", "name": "Profit Green", "category": "themes", "slot": "theme",
+        "price": 750, "rarity": "Comune", "new": True, "limited": False,
+        "desc": "Tema verde essenziale per embed personali in stile profitto positivo.",
+        "color": COLOR_GREEN,
+    },
+    "theme_gold_market": {
+        "emoji": "🟡", "name": "Gold Market", "category": "themes", "slot": "theme",
+        "price": 2500, "rarity": "Rara", "new": False, "limited": False,
+        "desc": "Tema dorato premium per trader in evidenza.",
+        "color": COLOR_GOLD,
+    },
 
-    # FRASI PROFILO
-    "flair_buy_the_dip": {"emoji": "💬", "name": "Buy the Dip", "category": "flairs", "slot": "flair", "price": 900, "rarity": "Comune", "new": True, "limited": False, "desc": "Frase profilo mostrata sotto il Titolo nel profilo."},
-    "flair_risk_manager": {"emoji": "💬", "name": "Gestisco il rischio, non la fortuna", "category": "flairs", "slot": "flair", "price": 1400, "rarity": "Non comune", "new": False, "limited": False, "desc": "Motto cosmetico per profilo e identità trader."},
-    "flair_mercato_parla": {"emoji": "💬", "name": "Il mercato parla", "category": "flairs", "slot": "flair", "price": 1100, "rarity": "Comune", "new": False, "limited": False, "desc": "Frase breve da mostrare nel profilo."},
+    # TITLES
+    "title_sharp_trader": {
+        "emoji": "🎯", "name": "Sharp Trader", "category": "titles", "slot": "title",
+        "price": 1200, "rarity": "Comune", "new": False, "limited": False,
+        "desc": "Title cosmetico mostrato sotto il nome nel profilo. Non modifica lo Status di gioco."
+    },
+    "title_market_maker": {
+        "emoji": "📈", "name": "Market Maker", "category": "titles", "slot": "title",
+        "price": 3000, "rarity": "Rara", "new": False, "limited": False,
+        "desc": "Title premium per chi domina i mercati. Solo estetico."
+    },
+    "title_value_hunter": {
+        "emoji": "🧭", "name": "Value Hunter", "category": "titles", "slot": "title",
+        "price": 2200, "rarity": "Non comune", "new": True, "limited": False,
+        "desc": "Title per chi cerca valore prima della massa."
+    },
 
-    # CASSE
-    "crate_basic": {"emoji": "📦", "name": "Cassa Base", "category": "crates", "slot": None, "price": 1000, "rarity": "Comune", "new": True, "limited": False, "desc": "Cassa cosmetica da inventario. Apertura premi da sviluppare in una fase successiva."},
-    "crate_premium": {"emoji": "🎁", "name": "Cassa Premium", "category": "crates", "slot": None, "price": 3000, "rarity": "Rara", "new": True, "limited": False, "desc": "Cassa cosmetica premium da inventario. Nessun vantaggio competitivo."},
+    # FLAIRS
+    "flair_buy_the_dip": {
+        "emoji": "💬", "name": "Buy the Dip", "category": "flairs", "slot": "flair",
+        "price": 900, "rarity": "Comune", "new": True, "limited": False,
+        "desc": "Flair personale mostrato sotto il Title nel profilo."
+    },
+    "flair_risk_manager": {
+        "emoji": "💬", "name": "Gestisco il rischio, non la fortuna", "category": "flairs", "slot": "flair",
+        "price": 1400, "rarity": "Non comune", "new": False, "limited": False,
+        "desc": "Motto cosmetico per profilo e identità trader."
+    },
+    "flair_mercato_parla": {
+        "emoji": "💬", "name": "Il mercato parla", "category": "flairs", "slot": "flair",
+        "price": 1100, "rarity": "Comune", "new": False, "limited": False,
+        "desc": "Frase breve da mostrare nel profilo."
+    },
+
+    # COLLECTIBLES
+    "collectible_founder": {
+        "emoji": "🏛️", "name": "Founder Relic", "category": "collectibles", "slot": "collectible",
+        "price": 5000, "rarity": "Limitata", "new": False, "limited": True,
+        "desc": "Collezionabile limitato per i primi sostenitori. Separato dai badge vinti."
+    },
+    "collectible_bull": {
+        "emoji": "🐂", "name": "Bull Token", "category": "collectibles", "slot": "collectible",
+        "price": 2600, "rarity": "Rara", "new": True, "limited": False,
+        "desc": "Pezzo da collezione visibile negli embed personali."
+    },
+    "collectible_bear": {
+        "emoji": "🐻", "name": "Bear Token", "category": "collectibles", "slot": "collectible",
+        "price": 2600, "rarity": "Rara", "new": True, "limited": False,
+        "desc": "Collezionabile per trader prudenti e contrarian."
+    },
+
+    # DECORATIVE IMAGES / DECORATIONS
+    "decor_night_trader": {
+        "emoji": "🌌", "name": "Night Trader Decoration", "category": "decorative", "slot": "decorative",
+        "price": 3500, "rarity": "Epica", "new": True, "limited": False,
+        "desc": "Elemento decorativo testuale per gli embed personali."
+    },
+    "decor_stadium_banner": {
+        "emoji": "🏟️", "name": "Stadium Banner", "category": "decorative", "slot": "decorative",
+        "price": 2100, "rarity": "Non comune", "new": False, "limited": False,
+        "desc": "Banner decorativo per dare agli embed un taglio più sportivo."
+    },
+
+    # CRATES
+    "crate_basic": {
+        "emoji": "📦", "name": "Cassa Base", "category": "crates", "slot": None,
+        "price": 1000, "rarity": "Comune", "new": True, "limited": False,
+        "desc": "Cassa cosmetica da inventario. Apertura premi da sviluppare in una fase successiva."
+    },
+    "crate_premium": {
+        "emoji": "🎁", "name": "Cassa Premium", "category": "crates", "slot": None,
+        "price": 3000, "rarity": "Rara", "new": True, "limited": False,
+        "desc": "Cassa cosmetica premium da inventario. Nessun vantaggio competitivo."
+    },
+
+    # Legacy IDs mantenuti per non rompere inventari già esistenti.
+    "frame_green": {
+        "emoji": "🟢", "name": "Profit Green Legacy", "category": "themes", "slot": "theme",
+        "price": 750, "rarity": "Comune", "new": False, "limited": False,
+        "desc": "Versione legacy convertita in Embed Theme.",
+        "color": COLOR_GREEN,
+    },
+    "frame_gold": {
+        "emoji": "🟡", "name": "Gold Market Legacy", "category": "themes", "slot": "theme",
+        "price": 2500, "rarity": "Rara", "new": False, "limited": False,
+        "desc": "Versione legacy convertita in Embed Theme.",
+        "color": COLOR_GOLD,
+    },
+    "badge_founder": {
+        "emoji": "🏛️", "name": "Founder Relic Legacy", "category": "collectibles", "slot": "collectible",
+        "price": 5000, "rarity": "Limitata", "new": False, "limited": True,
+        "desc": "Vecchio badge vetrina convertito in Collectible acquistato."
+    },
+    "case_basic": {
+        "emoji": "📦", "name": "Cassa Base Legacy", "category": "crates", "slot": None,
+        "price": 1000, "rarity": "Comune", "new": False, "limited": False,
+        "desc": "Vecchia cassa base mantenuta per compatibilità inventario."
+    },
+    "bundle_night_trader": {
+        "emoji": "🌌", "name": "Night Trader Legacy", "category": "decorative", "slot": "decorative",
+        "price": 6500, "rarity": "Epica", "new": False, "limited": False,
+        "desc": "Vecchio bundle convertito in Decorative Image/Decoration."
+    },
 }
 
 EQUIPMENT_SLOTS = {
-    "theme": "Tema embed", "title": "Titolo", "flair": "Frase profilo", "collectible": "Collezionabile", "decorative": "Immagine decorativa",
-    "frame": "Tema embed legacy", "showcase": "Collezionabile legacy", "bundle": "Decorazione legacy",
+    "theme": "Embed Theme",
+    "title": "Title",
+    "flair": "Flair",
+    "collectible": "Collectible",
+    "decorative": "Decorative Image",
+    # Slot legacy accettati solo per sicurezza, ma non più proposti nello shop.
+    "frame": "Embed Theme legacy",
+    "showcase": "Collectible legacy",
+    "bundle": "Decorative legacy",
 }
 
 
@@ -4404,25 +4560,29 @@ def user_owns_item(user_id, item_id):
 def get_equipped_items(user_id):
     c.execute("SELECT slot, item_id FROM user_equipment WHERE user_id=?", (str(user_id),))
     equipped = {slot: item_id for slot, item_id in c.fetchall()}
+
+    # Normalizzazione legacy: se qualcuno ha ancora vecchi slot equipaggiati, li leggiamo come nuovi slot.
     if "theme" not in equipped and "frame" in equipped:
         equipped["theme"] = equipped["frame"]
     if "collectible" not in equipped and "showcase" in equipped:
         equipped["collectible"] = equipped["showcase"]
     if "decorative" not in equipped and "bundle" in equipped:
         equipped["decorative"] = equipped["bundle"]
+
     return equipped
 
 
 def get_equipped_item(user_id, slot):
-    equipped = get_equipped_items(user_id)
-    item_id = equipped.get(slot)
-    return SHOP_ITEMS.get(item_id) if item_id else None
+    item_id = get_equipped_items(user_id).get(slot)
+    if not item_id:
+        return None
+    return SHOP_ITEMS.get(item_id)
 
 
 def get_equipped_items_text(user_id):
     equipped = get_equipped_items(user_id)
     lines = []
-    for slot in ["theme", "title", "flair", "collectible"]:
+    for slot in ["theme", "title", "flair", "collectible", "decorative"]:
         item_id = equipped.get(slot)
         item = SHOP_ITEMS.get(item_id) if item_id else None
         if item:
@@ -4434,6 +4594,7 @@ def get_purchased_collectibles_text(user_id, equipped_only=False):
     if equipped_only:
         item = get_equipped_item(user_id, "collectible")
         return f"{item['emoji']} **{item['name']}**" if item else "Nessun collezionabile equipaggiato."
+
     c.execute("""
         SELECT item_id, quantity
         FROM user_inventory
@@ -4461,61 +4622,92 @@ def get_profile_identity_lines(user_id):
     return "\n".join(lines)
 
 
-def get_cosmetic_style(user_id):
-    equipped = get_equipped_items(user_id)
-    style = {"color": None, "title_prefix": "", "description_prefix": "", "footer_suffix": "", "author_suffix": "", "collectible": "", "decorative_image_url": ""}
+def get_status_emoji_from_level(trader_level):
+    text = str(trader_level or "").strip()
+    return text.split()[0] if text else "👤"
 
-    theme_item = SHOP_ITEMS.get(equipped.get("theme")) if equipped.get("theme") else None
+
+def get_cosmetic_style(user_id):
+    """Trasforma gli oggetti equipaggiati in effetti grafici reali sugli embed."""
+    equipped = get_equipped_items(user_id)
+    style = {
+        "color": None,
+        "title_prefix": "",
+        "description_prefix": "",
+        "footer_suffix": "",
+        "author_suffix": "",
+        "collectible": "",
+        "decorative": "",
+    }
+
+    theme_id = equipped.get("theme")
+    title_id = equipped.get("title")
+    flair_id = equipped.get("flair")
+    collectible_id = equipped.get("collectible")
+    decorative_id = equipped.get("decorative")
+
+    theme_item = SHOP_ITEMS.get(theme_id) if theme_id else None
     if theme_item:
         style["color"] = theme_item.get("color") or COLOR_PURPLE
-        style["footer_suffix"] += f" • Tema: {theme_item['name']}"
+        style["footer_suffix"] += f" • Theme: {theme_item['name']}"
 
-    title_item = SHOP_ITEMS.get(equipped.get("title")) if equipped.get("title") else None
+    # Compatibilità per vecchi temi hardcoded.
+    if theme_id == "theme_dark_exchange":
+        style["description_prefix"] += "🌑 **Tema Dark Exchange attivo**\n"
+    elif theme_id == "theme_stadium":
+        style["description_prefix"] += "🏟️ **Tema Stadium Lights attivo**\n"
+
+    title_item = SHOP_ITEMS.get(title_id) if title_id else None
     if title_item:
         style["author_suffix"] = f" • {title_item['name']}"
 
-    flair_item = SHOP_ITEMS.get(equipped.get("flair")) if equipped.get("flair") else None
+    flair_item = SHOP_ITEMS.get(flair_id) if flair_id else None
     if flair_item:
-        style["footer_suffix"] += f" • Frase: {flair_item['name']}"
+        style["footer_suffix"] += f" • Flair: {flair_item['name']}"
 
-    collectible_item = SHOP_ITEMS.get(equipped.get("collectible")) if equipped.get("collectible") else None
+    collectible_item = SHOP_ITEMS.get(collectible_id) if collectible_id else None
     if collectible_item:
         style["collectible"] = f"{collectible_item['emoji']} **{collectible_item['name']}**"
 
-    decorative_item = SHOP_ITEMS.get(equipped.get("decorative")) if equipped.get("decorative") else None
+    decorative_item = SHOP_ITEMS.get(decorative_id) if decorative_id else None
     if decorative_item:
-        image_url = decorative_item.get("image_url") or decorative_item.get("url") or decorative_item.get("image") or ""
-        if image_url:
-            style["decorative_image_url"] = str(image_url).strip()
+        style["decorative"] = f"{decorative_item['emoji']} **{decorative_item['name']}**"
+        style["footer_suffix"] += f" • Decorazione: {decorative_item['name']}"
 
     return style
 
 
 def apply_cosmetics_to_embed(embed, user_id, member=None, base_footer=None, show_collectible=True, show_decorative=True):
+    """Applica tema, title/flair e collezionabili agli embed personali."""
     style = get_cosmetic_style(user_id)
+
     if style["color"] is not None:
         embed.color = discord.Color(style["color"])
+
     if style["title_prefix"] and embed.title:
         embed.title = f"{style['title_prefix']}{embed.title}"
+
     if style["description_prefix"]:
         embed.description = f"{style['description_prefix']}{embed.description or ''}"
+
     if member is not None and style["author_suffix"]:
         try:
             embed.set_author(name=f"{member.display_name}{style['author_suffix']}", icon_url=member.display_avatar.url)
         except Exception:
             pass
+
     if show_collectible and style["collectible"]:
-        embed.add_field(name="🏺 Collezionabile equipaggiato", value=style["collectible"][:1024], inline=False)
-    if show_decorative and style.get("decorative_image_url"):
-        try:
-            embed.set_image(url=style["decorative_image_url"])
-        except Exception:
-            pass
+        embed.add_field(name="🏺 Collectible equipaggiato", value=style["collectible"][:1024], inline=False)
+
+    if show_decorative and style["decorative"]:
+        embed.add_field(name="🖼️ Decorazione equipaggiata", value=style["decorative"][:1024], inline=False)
+
     footer = base_footer or ""
     if style["footer_suffix"]:
         footer = f"{footer}{style['footer_suffix']}" if footer else style["footer_suffix"].lstrip(" •")
     if footer:
         embed.set_footer(text=footer[:2048])
+
     return embed
 
 
@@ -4527,31 +4719,51 @@ def build_shop_item_line(item_id, item):
     if item.get("limited"):
         tags.append("⭐ Limitato")
     tag_text = f" • {' • '.join(tags)}" if tags else ""
-    return f"`{item_id}`\n💰 {item['price']} crediti • 🏷️ {item['rarity']} • 🎛️ {slot}{tag_text}\n_{item['desc']}_"
+    return (
+        f"`{item_id}` — {item['emoji']} **{item['name']}**\n"
+        f"💰 {item['price']} crediti • 🏷️ {item['rarity']} • 🎛️ {slot}{tag_text}\n"
+        f"_{item['desc']}_"
+    )
 
 
 @bot.command(name="shop", aliases=["marketplace", "negozio"])
 async def shop(ctx, category: str = None):
     if not category:
-        embed = discord.Embed(title="🛒 Marketplace", description="Spendi i crediti solo in oggetti cosmetici. Nessun oggetto dà vantaggi nel trading.", color=COLOR_PURPLE)
+        embed = discord.Embed(
+            title="🛒 Marketplace",
+            description="Spendi i crediti solo in oggetti cosmetici. Nessun oggetto dà vantaggi nel trading.",
+            color=COLOR_PURPLE
+        )
         for key, data in SHOP_CATEGORIES.items():
             count = sum(1 for item in SHOP_ITEMS.values() if item.get("category") == key)
-            embed.add_field(name=f"{data['emoji']} {data['name']}", value=f"{data['desc']}\n`!shop {data.get('command', key)}` • {count} oggetti", inline=False)
+            embed.add_field(
+                name=f"{data['emoji']} {data['name']}",
+                value=f"{data['desc']}\n`!shop {key}` • {count} oggetti",
+                inline=False
+            )
         embed.set_footer(text="Comandi: !buyitem item_id • !inventory • !equip item_id • !unequip slot")
         await ctx.send(embed=embed)
         return
+
     category = normalize_shop_category(category)
     if category not in SHOP_CATEGORIES:
         await ctx.send("❌ Categoria non valida. Usa `!shop` per vedere le 6 categorie disponibili.")
         return
+
     items = [(item_id, item) for item_id, item in SHOP_ITEMS.items() if item.get("category") == category]
     data = SHOP_CATEGORIES[category]
-    embed = discord.Embed(title=f"{data['emoji']} {data['name']}", description=data["desc"], color=COLOR_PURPLE)
+    embed = discord.Embed(
+        title=f"{data['emoji']} {data['name']}",
+        description=data["desc"],
+        color=COLOR_PURPLE
+    )
+
     if not items:
-        embed.add_field(name="📭 Nessun oggetto", value="Questa categoria è vuota. Verrà riscritta con nuovi oggetti.", inline=False)
+        embed.add_field(name="📭 Nessun oggetto", value="Questa categoria è vuota.", inline=False)
     else:
         for item_id, item in items[:12]:
             embed.add_field(name=f"{item['emoji']} {item['name']}", value=build_shop_item_line(item_id, item), inline=False)
+
     embed.set_footer(text="Acquista con !buyitem item_id")
     await ctx.send(embed=embed)
 
@@ -4560,21 +4772,25 @@ async def shop(ctx, category: str = None):
 async def buyitem(ctx, item_id: str = None):
     user_id = str(ctx.author.id)
     if not item_id:
-        await ctx.send("❌ Devi indicare l'ID oggetto. Esempio: `!buyitem item_id`")
+        await ctx.send("❌ Devi indicare l'ID oggetto. Esempio: `!buyitem theme_dark_exchange`")
         return
+
     item_id = item_id.lower().strip()
     item = get_shop_item(item_id)
     if not item:
         await ctx.send("❌ Oggetto non trovato. Usa `!shop` per vedere il Marketplace.")
         return
+
     if user_owns_item(user_id, item_id):
         await ctx.send("❌ Possiedi già questo oggetto.")
         return
+
     balance = get_user(user_id)
     price = int(item["price"])
     if balance < price:
         await ctx.send(f"❌ Crediti insufficienti. Prezzo: **{price}**, saldo: **{balance}**.")
         return
+
     now = datetime.now(timezone.utc).isoformat()
     c.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (price, user_id))
     c.execute("""
@@ -4587,7 +4803,12 @@ async def buyitem(ctx, item_id: str = None):
     """, (user_id, item_id, price, now))
     conn.commit()
     record_wealth_snapshot(user_id)
-    embed = discord.Embed(title="✅ Acquisto completato", description=f"Hai acquistato {item['emoji']} **{item['name']}**.", color=COLOR_GREEN)
+
+    embed = discord.Embed(
+        title="✅ Acquisto completato",
+        description=f"Hai acquistato {item['emoji']} **{item['name']}**.",
+        color=COLOR_GREEN
+    )
     embed.add_field(name="Categoria", value=SHOP_CATEGORIES[item['category']]["name"], inline=True)
     embed.add_field(name="💰 Prezzo", value=f"{price} crediti", inline=True)
     embed.add_field(name="💳 Saldo residuo", value=str(get_user(user_id)), inline=True)
@@ -4610,9 +4831,14 @@ async def inventory(ctx, member: discord.Member = None):
         ORDER BY purchased_at DESC
     """, (user_id,))
     rows = c.fetchall()
-    embed = discord.Embed(title=f"🎒 Inventario di {member.display_name}", color=COLOR_BLUE)
+
+    embed = discord.Embed(
+        title=f"🎒 Inventario di {member.display_name}",
+        color=COLOR_BLUE
+    )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🎛️ Equipaggiati", value=get_equipped_items_text(user_id), inline=False)
+
     if not rows:
         embed.add_field(name="📭 Vuoto", value="Nessun oggetto acquistato. Usa `!shop` per aprire il Marketplace.", inline=False)
     else:
@@ -4624,11 +4850,13 @@ async def inventory(ctx, member: discord.Member = None):
             qty_text = f" x{quantity}" if quantity and quantity > 1 else ""
             slot = EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario"
             grouped.setdefault(item.get("category", "collectibles"), []).append(f"`{item_id}` — {item['emoji']} **{item['name']}**{qty_text} • {slot}")
+
         for category, lines in grouped.items():
             if not lines:
                 continue
             data = SHOP_CATEGORIES.get(category, {"emoji": "📦", "name": category})
             embed.add_field(name=f"{data['emoji']} {data['name']}", value="\n".join(lines[:8])[:1024], inline=False)
+
     embed.set_footer(text="Equipaggia con !equip item_id • Rimuovi con !unequip slot")
     await ctx.send(embed=embed)
 
@@ -4637,61 +4865,83 @@ async def inventory(ctx, member: discord.Member = None):
 async def equip(ctx, item_id: str = None):
     user_id = str(ctx.author.id)
     if not item_id:
-        await ctx.send("❌ Devi indicare l'ID oggetto. Esempio: `!equip item_id`")
+        await ctx.send("❌ Devi indicare l'ID oggetto. Esempio: `!equip theme_dark_exchange`")
         return
+
     item_id = item_id.lower().strip()
     item = get_shop_item(item_id)
     if not item:
         await ctx.send("❌ Oggetto non trovato.")
         return
+
     if not user_owns_item(user_id, item_id):
         await ctx.send("❌ Non possiedi questo oggetto. Acquistalo prima con `!buyitem item_id`.")
         return
+
     slot = item.get("slot")
     if not slot:
         await ctx.send("❌ Questo oggetto è solo da inventario e non può essere equipaggiato.")
         return
+
     now = datetime.now(timezone.utc).isoformat()
     c.execute("""
         INSERT OR REPLACE INTO user_equipment (user_id, slot, item_id, equipped_at)
         VALUES (?, ?, ?, ?)
     """, (user_id, slot, item_id, now))
     conn.commit()
+
     await ctx.send(f"✅ Hai equipaggiato {item['emoji']} **{item['name']}** nello slot **{EQUIPMENT_SLOTS.get(slot, slot)}**.")
 
 
 @bot.command(name="unequip", aliases=["rimuoviitem"])
 async def unequip(ctx, slot: str = None):
     user_id = str(ctx.author.id)
-    visible_slots = "theme, title, flair, collectible, decorative"
     if not slot:
-        await ctx.send(f"❌ Devi indicare lo slot. Slot disponibili: `{visible_slots}`.")
+        await ctx.send("❌ Devi indicare lo slot. Slot disponibili: `theme`, `title`, `flair`, `collectible`, `decorative`.")
         return
+
     slot = slot.lower().strip()
+    legacy_slot_map = {"frame": "theme", "showcase": "collectible", "bundle": "decorative"}
+    slot = legacy_slot_map.get(slot, slot)
     if slot not in EQUIPMENT_SLOTS:
-        await ctx.send(f"❌ Slot non valido. Slot disponibili: `{visible_slots}`.")
+        await ctx.send("❌ Slot non valido. Slot disponibili: `theme`, `title`, `flair`, `collectible`, `decorative`.")
         return
+
     c.execute("DELETE FROM user_equipment WHERE user_id=? AND slot=?", (user_id, slot))
     removed = c.rowcount
+    # Pulizia eventuale vecchio slot collegato.
+    for legacy, normalized in {"frame": "theme", "showcase": "collectible", "bundle": "decorative"}.items():
+        if normalized == slot:
+            c.execute("DELETE FROM user_equipment WHERE user_id=? AND slot=?", (user_id, legacy))
+            removed += c.rowcount
     conn.commit()
+
     if removed <= 0:
         await ctx.send("📭 Non avevi nulla equipaggiato in questo slot.")
         return
+
     await ctx.send(f"✅ Slot **{EQUIPMENT_SLOTS[slot]}** svuotato.")
 
 
 @bot.command(name="adminshop", aliases=["shopadmin"])
 @admin_only()
 async def adminshop(ctx, action: str = "overview", target: str = None):
+    """Comando admin unico e centralizzato per controllare il Marketplace."""
     action = (action or "overview").lower().strip()
-    if action in ["overview", "lista", "list"]:
-        embed = discord.Embed(title="🛠️ Admin Shop", description="Riepilogo categorie Marketplace.", color=COLOR_WHITE)
+
+    if action in ["overview", "status", "categorie", "categories"]:
+        embed = discord.Embed(
+            title="👑 Admin Shop",
+            description="Pannello unico Marketplace. Gli oggetti sono hardcoded nel file; questo comando centralizza verifica e diagnostica.",
+            color=COLOR_WHITE
+        )
         for key, data in SHOP_CATEGORIES.items():
             count = sum(1 for item in SHOP_ITEMS.values() if item.get("category") == key)
-            embed.add_field(name=f"{data['emoji']} {data['name']}", value=f"Chiave: `{key}` • Comando: `!shop {data.get('command', key)}` • Oggetti: **{count}**", inline=False)
+            embed.add_field(name=f"{data['emoji']} {data['name']}", value=f"{count} oggetti • `!shop {key}`", inline=False)
         embed.set_footer(text="Azioni: !adminshop overview • !adminshop item item_id • !adminshop user @utente")
         await ctx.send(embed=embed)
         return
+
     if action == "item":
         if not target:
             await ctx.send("❌ Usa `!adminshop item item_id`.")
@@ -4700,25 +4950,28 @@ async def adminshop(ctx, action: str = "overview", target: str = None):
         if not item:
             await ctx.send("❌ Oggetto non trovato.")
             return
-        embed = discord.Embed(title=f"🛠️ {item['emoji']} {item['name']}", description=item.get("desc", ""), color=COLOR_WHITE)
+        embed = discord.Embed(title=f"👑 Item admin: {item['name']}", color=COLOR_WHITE)
         embed.add_field(name="ID", value=f"`{target}`", inline=True)
         embed.add_field(name="Categoria", value=SHOP_CATEGORIES[item['category']]["name"], inline=True)
         embed.add_field(name="Slot", value=EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario", inline=True)
-        embed.add_field(name="Prezzo", value=f"{item['price']} crediti", inline=True)
-        embed.add_field(name="Rarità", value=item.get("rarity", "N/D"), inline=True)
+        embed.add_field(name="Prezzo", value=str(item["price"]), inline=True)
+        embed.add_field(name="Rarità", value=item["rarity"], inline=True)
+        embed.add_field(name="Descrizione", value=item["desc"], inline=False)
         await ctx.send(embed=embed)
         return
+
     if action == "user":
         if not ctx.message.mentions:
             await ctx.send("❌ Usa `!adminshop user @utente`.")
             return
         member = ctx.message.mentions[0]
-        embed = discord.Embed(title=f"🛠️ Shop user: {member.display_name}", color=COLOR_WHITE)
+        embed = discord.Embed(title=f"👑 Shop user: {member.display_name}", color=COLOR_WHITE)
         embed.add_field(name="Equipaggiati", value=get_equipped_items_text(str(member.id)), inline=False)
+        embed.add_field(name="Collezionabili acquistati", value=get_purchased_collectibles_text(str(member.id)), inline=False)
         await ctx.send(embed=embed)
         return
-    await ctx.send("❌ Azione non valida. Usa `!adminshop overview`, `!adminshop item item_id`, `!adminshop user @utente`.")
 
+    await ctx.send("❌ Azione non valida. Usa `!adminshop overview`, `!adminshop item item_id`, `!adminshop user @utente`.")
 
 # =========================
 # SEASON SYSTEM
@@ -5017,7 +5270,7 @@ async def help_command(ctx, section: str = None):
         name="🛒 Marketplace",
         value=(
             "`!shop` / `!marketplace` / `!negozio`\n"
-            "`!shop cosmetics|cases|bundles|limited|new`\n"
+            "`!shop themes|titles|flairs|collectibles|decorative|crates`\n"
             "`!buyitem item_id` / `!compraitem`\n"
             "`!inventory` / `!inventario`\n"
             "`!equip item_id` / `!equipaggia`\n"
@@ -5962,3 +6215,96 @@ async def on_ready():
 # RUN
 # =========================
 bot.run(token)
+
+
+# === Marketplace Theme Update v2.0.2 ===
+# Temi Embed:
+# Standard, After Hours, Iceberg, Dark Pool,
+# Toro di Smeraldo, Blue Chip,
+# Prime Broker, Aurora Quantica
+# Colore predefinito embed: COLOR_GREY
+# I temi modificano !profile, !portfolio e !balance.
+
+
+# === TEMI EMBED v2.0.2 ===
+SHOP_ITEMS.update({
+    "theme_standard":{
+        "emoji":"⚪","name":"Standard","category":"embed_themes","slot":"theme",
+        "price":0,"rarity":"Comune","new":False,"limited":False,
+        "desc":"Tema classico dai toni grigi."
+    },
+    "theme_after_hours":{
+        "emoji":"🌌","name":"After Hours","category":"embed_themes","slot":"theme",
+        "price":2500,"rarity":"Comune","new":True,"limited":False,
+        "desc":"Tema viola ispirato ai mercati notturni."
+    },
+    "theme_iceberg":{
+        "emoji":"🧊","name":"Iceberg","category":"embed_themes","slot":"theme",
+        "price":4500,"rarity":"Non comune","new":True,"limited":False,
+        "desc":"Tema glaciale dai toni ghiaccio."
+    },
+    "theme_dark_pool":{
+        "emoji":"🌑","name":"Dark Pool","category":"embed_themes","slot":"theme",
+        "price":7500,"rarity":"Rara","new":True,"limited":False,
+        "desc":"Tema viola scuro dal look esclusivo."
+    },
+    "theme_emerald_bull":{
+        "emoji":"🌿","name":"Toro di Smeraldo","category":"embed_themes","slot":"theme",
+        "price":9000,"rarity":"Rara","new":True,"limited":False,
+        "desc":"Tema verde smeraldo raffinato."
+    },
+    "theme_blue_chip":{
+        "emoji":"💎","name":"Blue Chip","category":"embed_themes","slot":"theme",
+        "price":15000,"rarity":"Epica","new":True,"limited":False,
+        "desc":"Tema blu profondo ed elegante."
+    },
+    "theme_prime_broker":{
+        "emoji":"👑","name":"Prime Broker","category":"embed_themes","slot":"theme",
+        "price":25000,"rarity":"Epica","new":True,"limited":False,
+        "desc":"Tema dorato dallo stile premium."
+    },
+    "theme_quantum_aurora":{
+        "emoji":"🌠","name":"Aurora Quantica","category":"embed_themes","slot":"theme",
+        "price":35000,"rarity":"Leggendaria","new":True,"limited":False,
+        "desc":"Tema cangiante viola e ciano."
+    },
+})
+
+
+# === THEME STYLE MAPPING v2.0.2 ===
+THEME_STYLES = {
+    "theme_standard": {"color":0x95A5A6,"emoji":"⚪","separator":"────────"},
+    "theme_after_hours": {"color":0x6C3FC9,"emoji":"🌌","separator":"═══════"},
+    "theme_iceberg": {"color":0xBFEFFF,"emoji":"🧊","separator":"❄────❄"},
+    "theme_dark_pool": {"color":0x2B124C,"emoji":"🌑","separator":"⬛────⬛"},
+    "theme_emerald_bull": {"color":0x00A86B,"emoji":"🌿","separator":"🌿────🌿"},
+    "theme_blue_chip": {"color":0x1F4E8C,"emoji":"💎","separator":"◆────◆"},
+    "theme_prime_broker": {"color":0xD4AF37,"emoji":"👑","separator":"👑────👑"},
+    "theme_quantum_aurora": {"color":0x7B5CFF,"emoji":"🌠","separator":"✦────✦"},
+}
+
+# In get_cosmetic_style():
+# theme = equipped.get("theme")
+# if theme in THEME_STYLES:
+#     style["color"] = THEME_STYLES[theme]["color"]
+#     style["title_prefix"] = THEME_STYLES[theme]["emoji"] + " "
+#     style["separator"] = THEME_STYLES[theme]["separator"]
+# apply_cosmetics_to_embed() should use these values for !profile, !portfolio and !balance.
+
+
+# === AUTO THEME APPLICATION PATCH ===
+def apply_theme_style(style, equipped):
+    theme = equipped.get("theme")
+    cfg = THEME_STYLES.get(theme or "theme_standard", THEME_STYLES["theme_standard"])
+    style["color"] = cfg["color"]
+    style["title_prefix"] = cfg["emoji"] + " "
+    style["separator"] = cfg["separator"]
+    return style
+
+# In get_cosmetic_style(), after reading equipped items:
+# style = apply_theme_style(style, equipped)
+#
+# apply_cosmetics_to_embed() already propagates style to every personal embed.
+# Therefore !profile, !portfolio and !balance will automatically use the
+# equipped theme once get_cosmetic_style() calls apply_theme_style().
+
