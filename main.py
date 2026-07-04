@@ -1,41 +1,3 @@
-import os
-import discord
-import sqlite3
-import requests
-import asyncio
-import html
-import re
-import matplotlib.pyplot as plt
-import io
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-
-plt.style.use("dark_background")
-plt.rcParams["font.family"] = "DejaVu Sans"
-plt.rcParams["axes.titleweight"] = "bold"
-plt.rcParams["axes.labelsize"] = 11
-
-from datetime import datetime, timedelta, timezone
-try:
-    from zoneinfo import ZoneInfo
-except Exception:
-    ZoneInfo = None
-from discord.ext import commands
-
-try:
-    from scipy.interpolate import make_interp_spline
-except Exception:
-    make_interp_spline = None
-
-import numpy as np
-
-
-# =========================
-# TOKEN
-# =========================
-token = os.environ.get("DISCORD_TOKEN")
-
-# =========================
 # DISCORD SETUP
 # =========================
 intents = discord.Intents.default()
@@ -6269,42 +6231,4 @@ SHOP_ITEMS.update({
         "desc":"Tema cangiante viola e ciano."
     },
 })
-
-
-# === THEME STYLE MAPPING v2.0.2 ===
-THEME_STYLES = {
-    "theme_standard": {"color":0x95A5A6,"emoji":"⚪","separator":"────────"},
-    "theme_after_hours": {"color":0x6C3FC9,"emoji":"🌌","separator":"═══════"},
-    "theme_iceberg": {"color":0xBFEFFF,"emoji":"🧊","separator":"❄────❄"},
-    "theme_dark_pool": {"color":0x2B124C,"emoji":"🌑","separator":"⬛────⬛"},
-    "theme_emerald_bull": {"color":0x00A86B,"emoji":"🌿","separator":"🌿────🌿"},
-    "theme_blue_chip": {"color":0x1F4E8C,"emoji":"💎","separator":"◆────◆"},
-    "theme_prime_broker": {"color":0xD4AF37,"emoji":"👑","separator":"👑────👑"},
-    "theme_quantum_aurora": {"color":0x7B5CFF,"emoji":"🌠","separator":"✦────✦"},
-}
-
-# In get_cosmetic_style():
-# theme = equipped.get("theme")
-# if theme in THEME_STYLES:
-#     style["color"] = THEME_STYLES[theme]["color"]
-#     style["title_prefix"] = THEME_STYLES[theme]["emoji"] + " "
-#     style["separator"] = THEME_STYLES[theme]["separator"]
-# apply_cosmetics_to_embed() should use these values for !profile, !portfolio and !balance.
-
-
-# === AUTO THEME APPLICATION PATCH ===
-def apply_theme_style(style, equipped):
-    theme = equipped.get("theme")
-    cfg = THEME_STYLES.get(theme or "theme_standard", THEME_STYLES["theme_standard"])
-    style["color"] = cfg["color"]
-    style["title_prefix"] = cfg["emoji"] + " "
-    style["separator"] = cfg["separator"]
-    return style
-
-# In get_cosmetic_style(), after reading equipped items:
-# style = apply_theme_style(style, equipped)
-#
-# apply_cosmetics_to_embed() already propagates style to every personal embed.
-# Therefore !profile, !portfolio and !balance will automatically use the
-# equipped theme once get_cosmetic_style() calls apply_theme_style().
 
