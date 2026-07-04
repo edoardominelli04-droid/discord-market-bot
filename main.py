@@ -2455,7 +2455,7 @@ async def portfolio(ctx):
         embed = discord.Embed(
             title=f"💼 Portafoglio di {ctx.author.display_name}",
             description="Non hai ancora aperto nessuna posizione.",
-            color=COLOR_BLUE
+            color=discord.Color(0x95A5A6)
         )
         embed.set_thumbnail(url=ctx.author.display_avatar.url)
         embed.add_field(name="💰 Saldo", value=f"{balance} crediti", inline=False)
@@ -2593,7 +2593,7 @@ async def following(ctx):
     embed = discord.Embed(
         title="👥 Trader seguiti",
         description="\n".join(lines),
-        color=COLOR_BLUE
+        color=discord.Color(0x95A5A6)
     )
     embed.set_footer(text="Usa !trader @utente per vedere una scheda sintetica.")
     await ctx.send(embed=embed)
@@ -2674,7 +2674,7 @@ async def profile(ctx):
     rank = calculate_server_rank(user_id)
     rank_text = f"#{rank}" if rank else "N/D"
 
-    color = COLOR_BLUE
+    color = 0x95A5A6
     profit_emoji = "🟢" if open_profit >= 0 else "🔴"
 
     embed = discord.Embed(
@@ -2752,9 +2752,9 @@ async def leaderboard(ctx):
         showcase_item = SHOP_ITEMS.get(equipped.get("showcase")) if equipped.get("showcase") else None
         cosmetic_line = ""
         if title_item:
-            cosmetic_line += f"\n🎖️ {title_item['emoji']} {title_item['name']}"
+            cosmetic_line += f"\n🎖️ {title_item.get('emoji', '🎛️')} {title_item.get('name', item_id)}"
         if showcase_item:
-            cosmetic_line += f"\n🎨 {showcase_item['emoji']} {showcase_item['name']}"
+            cosmetic_line += f"\n🎨 {showcase_item.get('emoji', '🎛️')} {showcase_item.get('name', item_id)}"
         embed.add_field(
             name=f"{medal} Posizione {i}",
             value=(
@@ -4395,12 +4395,12 @@ def normalize_shop_category(category):
     key = str(category).lower().strip()
 
     aliases = {
-        "temi": "embed_themes",
-        "tema": "embed_themes",
-        "theme": "embed_themes",
-        "themes": "embed_themes",
-        "embed": "embed_themes",
-        "embed_themes": "embed_themes",
+        "temi": "themes",
+        "tema": "themes",
+        "theme": "themes",
+        "themes": "themes",
+        "embed": "themes",
+        "embed_themes": "themes",
         "titoli": "titles",
         "titolo": "titles",
         "title": "titles",
@@ -4417,13 +4417,13 @@ def normalize_shop_category(category):
         "collection": "collectibles",
         "collectible": "collectibles",
         "collectibles": "collectibles",
-        "immagini": "decorations",
-        "immagine": "decorations",
-        "decorazioni": "decorations",
-        "decorazione": "decorations",
-        "image": "decorations",
-        "images": "decorations",
-        "decorations": "decorations",
+        "immagini": "decorative",
+        "immagine": "decorative",
+        "decorazioni": "decorative",
+        "decorazione": "decorative",
+        "image": "decorative",
+        "images": "decorative",
+        "decorations": "decorative",
         "casse": "crates",
         "cassa": "crates",
         "crate": "crates",
@@ -4467,14 +4467,14 @@ def get_equipped_items_text(user_id):
         item_id = equipped.get(slot)
         item = SHOP_ITEMS.get(item_id) if item_id else None
         if item:
-            lines.append(f"**{EQUIPMENT_SLOTS.get(slot, slot)}:** {item['emoji']} {item['name']}")
+            lines.append(f"**{EQUIPMENT_SLOTS.get(slot, slot)}:** {item.get('emoji', '🎛️')} {item.get('name', item_id)}")
     return "\n".join(lines) if lines else "Nessun cosmetico equipaggiato."
 
 
 def get_purchased_collectibles_text(user_id, equipped_only=False):
     if equipped_only:
         item = get_equipped_item(user_id, "collectible")
-        return f"{item['emoji']} **{item['name']}**" if item else "Nessun collezionabile equipaggiato."
+        return f"{item.get('emoji', '🎛️')} **{item.get('name', item_id)}**" if item else "Nessun collezionabile equipaggiato."
     c.execute("""
         SELECT item_id, quantity
         FROM user_inventory
@@ -4487,7 +4487,7 @@ def get_purchased_collectibles_text(user_id, equipped_only=False):
         item = SHOP_ITEMS.get(item_id)
         if item and item.get("category") == "collectibles":
             qty = f" x{quantity}" if quantity and quantity > 1 else ""
-            lines.append(f"{item['emoji']} **{item['name']}**{qty}")
+            lines.append(f"{item.get('emoji', '🎛️')} **{item.get('name', item_id)}**{qty}")
     return " • ".join(lines[:8]) if lines else "Nessun collezionabile acquistato."
 
 
@@ -4504,34 +4504,23 @@ def get_profile_identity_lines(user_id):
 
 def get_cosmetic_style(user_id):
     equipped = get_equipped_items(user_id)
-    style = {"color": None, "title_prefix": "", "description_prefix": "", "footer_suffix": "", "author_suffix": "", "collectible": "",
-        "decorative_image_url": "", "decorative_image_url": ""}
+    style = {
+        "color": None,
+        "title_prefix": "",
+        "description_prefix": "",
+        "footer_suffix": "",
+        "author_suffix": "",
+        "collectible": "",
+        "decorative_image_url": "",
+    }
 
-    theme_item = SHOP_ITEMS.get(equipped.get("theme")) if equipped.get("theme") else None
-    if theme_item:
-        style["color"] = theme_item.get("color") or COLOR_PURPLE
-        style["footer_suffix"] += f" • Tema: {theme_item['name']}"
+    theme_id = equipped.get("theme")
+    title_id = equipped.get("title")
+    flair_id = equipped.get("flair")
+    collectible_id = equipped.get("collectible")
+    decorative_id = equipped.get("decorative") or equipped.get("decoration")
 
-    title_item = SHOP_ITEMS.get(equipped.get("title")) if equipped.get("title") else None
-    if title_item:
-        style["author_suffix"] = f" • {title_item['name']}"
-
-    flair_item = SHOP_ITEMS.get(equipped.get("flair")) if equipped.get("flair") else None
-    if flair_item:
-        style["footer_suffix"] += f" • Frase: {flair_item['name']}"
-
-    collectible_item = SHOP_ITEMS.get(equipped.get("collectible")) if equipped.get("collectible") else None
-    if collectible_item:
-        style["collectible"] = f"{collectible_item['emoji']} **{collectible_item['name']}**"
-
-    decorative_item = SHOP_ITEMS.get(equipped.get("decorative")) if equipped.get("decorative") else None
-    if decorative_item:
-        image_url = decorative_item.get("image_url") or decorative_item.get("url") or decorative_item.get("image") or ""
-        if image_url:
-            style["decorative_image_url"] = str(image_url).strip()
-
-
-    # Temi Embed creati da Shop Admin: applicano davvero il colore agli embed personali.
+    # Tema embed: accetta sia i vecchi temi con "color" sia i nuovi con "theme_color".
     if theme_id and theme_id in SHOP_ITEMS:
         item = SHOP_ITEMS[theme_id]
         dyn_color = item.get("theme_color", item.get("color"))
@@ -4542,14 +4531,25 @@ def get_cosmetic_style(user_id):
                 pass
         if item.get("emoji"):
             style["title_prefix"] += f"{item.get('emoji')} "
+        style["footer_suffix"] += f" • Tema: {item.get('name', theme_id)}"
 
-    # Immagini decorative create da Shop Admin: appaiono come set_image nel profilo.
-    decoration_id = equipped.get("decoration")
-    if decoration_id and decoration_id in SHOP_ITEMS:
-        item = SHOP_ITEMS[decoration_id]
-        image_url = item.get("image_url") or item.get("decorative_image_url")
+    if title_id and title_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[title_id]
+        style["author_suffix"] = f" • {item.get('name', title_id)}"
+
+    if flair_id and flair_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[flair_id]
+        style["footer_suffix"] += f" • Frase: {item.get('name', flair_id)}"
+
+    if collectible_id and collectible_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[collectible_id]
+        style["collectible"] = f"{item.get('emoji', '🏺')} **{item.get('name', collectible_id)}**"
+
+    if decorative_id and decorative_id in SHOP_ITEMS:
+        item = SHOP_ITEMS[decorative_id]
+        image_url = item.get("image_url") or item.get("decorative_image_url") or item.get("url") or item.get("image") or ""
         if image_url:
-            style["decorative_image_url"] = image_url
+            style["decorative_image_url"] = str(image_url).strip()
 
     return style
 
@@ -4590,7 +4590,7 @@ def build_shop_item_line(item_id, item):
     if item.get("limited"):
         tags.append("⭐ Limitato")
     tag_text = f" • {' • '.join(tags)}" if tags else ""
-    return f"`{item_id}`\n💰 {item['price']} crediti • 🏷️ {item['rarity']} • 🎛️ {slot}{tag_text}\n_{item['desc']}_"
+    return f"`{item_id}`\n💰 {item.get('price', 0)} crediti • 🏷️ {item.get('rarity', '-')} • 🎛️ {slot}{tag_text}\n_{item.get('desc', item.get('description', ''))}_"
 
 
 @bot.command(name="shop", aliases=["marketplace", "negozio"])
@@ -4598,7 +4598,7 @@ async def shop(ctx, category: str = None):
     if not category:
         embed = discord.Embed(title="🛒 Marketplace", description="Spendi i crediti solo in oggetti cosmetici. Nessun oggetto dà vantaggi nel trading.", color=COLOR_PURPLE)
         for key, data in SHOP_CATEGORIES.items():
-            count = sum(1 for item in SHOP_ITEMS.values() if item.get("category") == key)
+            count = sum(1 for item in SHOP_ITEMS.values() if item.get("category") == key and not item.get("disabled", False))
             embed.add_field(name=f"{data['emoji']} {data['name']}", value=f"{data['desc']}\n`!shop {data.get('command', key)}` • {count} oggetti", inline=False)
         embed.set_footer(text="Comandi: !buyitem item_id • !inventory • !equip item_id • !unequip slot")
         await ctx.send(embed=embed)
@@ -4614,7 +4614,7 @@ async def shop(ctx, category: str = None):
         embed.add_field(name="📭 Nessun oggetto", value="Questa categoria è vuota. Verrà riscritta con nuovi oggetti.", inline=False)
     else:
         for item_id, item in items[:12]:
-            embed.add_field(name=f"{item['emoji']} {item['name']}", value=build_shop_item_line(item_id, item), inline=False)
+            embed.add_field(name=f"{item.get('emoji', '🎛️')} {item.get('name', item_id)}", value=build_shop_item_line(item_id, item), inline=False)
     embed.set_footer(text="Acquista con !buyitem item_id")
     await ctx.send(embed=embed)
 
@@ -4650,7 +4650,7 @@ async def buyitem(ctx, item_id: str = None):
     """, (user_id, item_id, price, now))
     conn.commit()
     record_wealth_snapshot(user_id)
-    embed = discord.Embed(title="✅ Acquisto completato", description=f"Hai acquistato {item['emoji']} **{item['name']}**.", color=COLOR_GREEN)
+    embed = discord.Embed(title="✅ Acquisto completato", description=f"Hai acquistato {item.get('emoji', '🎛️')} **{item.get('name', item_id)}**.", color=COLOR_GREEN)
     embed.add_field(name="Categoria", value=SHOP_CATEGORIES[item['category']]["name"], inline=True)
     embed.add_field(name="💰 Prezzo", value=f"{price} crediti", inline=True)
     embed.add_field(name="💳 Saldo residuo", value=str(get_user(user_id)), inline=True)
@@ -4673,7 +4673,7 @@ async def inventory(ctx, member: discord.Member = None):
         ORDER BY purchased_at DESC
     """, (user_id,))
     rows = c.fetchall()
-    embed = discord.Embed(title=f"🎒 Inventario di {member.display_name}", color=COLOR_BLUE)
+    embed = discord.Embed(title=f"🎒 Inventario di {member.display_name}", color=discord.Color(0x95A5A6))
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🎛️ Equipaggiati", value=get_equipped_items_text(user_id), inline=False)
     if not rows:
@@ -4686,7 +4686,7 @@ async def inventory(ctx, member: discord.Member = None):
                 continue
             qty_text = f" x{quantity}" if quantity and quantity > 1 else ""
             slot = EQUIPMENT_SLOTS.get(item.get("slot"), "Inventario") if item.get("slot") else "Inventario"
-            grouped.setdefault(item.get("category", "collectibles"), []).append(f"`{item_id}` — {item['emoji']} **{item['name']}**{qty_text} • {slot}")
+            grouped.setdefault(item.get("category", "collectibles"), []).append(f"`{item_id}` — {item.get('emoji', '🎛️')} **{item.get('name', item_id)}**{qty_text} • {slot}")
         for category, lines in grouped.items():
             if not lines:
                 continue
@@ -4720,7 +4720,7 @@ async def equip(ctx, item_id: str = None):
         VALUES (?, ?, ?, ?)
     """, (user_id, slot, item_id, now))
     conn.commit()
-    await ctx.send(f"✅ Hai equipaggiato {item['emoji']} **{item['name']}** nello slot **{EQUIPMENT_SLOTS.get(slot, slot)}**.")
+    await ctx.send(f"✅ Hai equipaggiato {item.get('emoji', '🎛️')} **{item.get('name', item_id)}** nello slot **{EQUIPMENT_SLOTS.get(slot, slot)}**.")
 
 
 @bot.command(name="unequip", aliases=["rimuoviitem"])
@@ -4762,11 +4762,11 @@ def cleanup_default_shop_items():
 # =========================
 
 SHOP_ADMIN_CATEGORIES = [
-    ("embed_themes", "🎨 Temi Embed"),
+    ("themes", "🎨 Temi Embed"),
     ("titles", "🏷️ Titoli"),
     ("flairs", "💬 Frasi Profilo"),
     ("collectibles", "🏆 Collezionabili"),
-    ("decorations", "🖼️ Immagini Decorative"),
+    ("decorative", "🖼️ Immagini Decorative"),
     ("crates", "📦 Casse"),
 ]
 
@@ -5024,11 +5024,11 @@ import discord
 
 def shop_admin_id_example(category):
     examples = {
-        "embed_themes": "theme_name_embed",
+        "themes": "theme_name_embed",
         "titles": "title_name",
         "flairs": "phrase_name",
         "collectibles": "collection_name",
-        "decorations": "image_name",
+        "decorative": "image_name",
         "crates": "crate_name",
     }
     return examples.get(category, "item_name")
@@ -5040,29 +5040,29 @@ class CreateItemModal(discord.ui.Modal, title="➕ Crea nuovo oggetto"):
     extra = discord.ui.TextInput(label="Colore HEX / URL immagine", placeholder="#95A5A6 oppure https://.../immagine.png", required=False, max_length=240)
     price = discord.ui.TextInput(label="Prezzo", placeholder="2500", max_length=10)
 
-    def __init__(self, category="embed_themes"):
+    def __init__(self, category="themes"):
         self.category = category
         super().__init__()
 
         examples = {
-            "embed_themes": "theme_name_embed",
+            "themes": "theme_name_embed",
             "titles": "title_name",
             "flairs": "phrase_name",
             "collectibles": "collection_name",
-            "decorations": "image_name",
+            "decorative": "image_name",
             "crates": "crate_name",
         }
 
         self.item_id.placeholder = examples.get(category, "item_name")
 
-        if category == "embed_themes":
+        if category == "themes":
             self.emoji.label = "Emoji tema"
             self.emoji.placeholder = "🌌"
             self.emoji.required = True
             self.extra.label = "Colore HEX"
             self.extra.placeholder = "#6C3FC9"
             self.extra.required = True
-        elif category == "decorations":
+        elif category == "decorative":
             self.emoji.label = "Emoji"
             self.emoji.placeholder = "🖼️"
             self.emoji.required = False
@@ -5106,14 +5106,14 @@ class CreateItemModal(discord.ui.Modal, title="➕ Crea nuovo oggetto"):
         if self.category == "flairs":
             emoji_value = "💬"
             description = extra_value or "Frase profilo mostrata sotto il Titolo."
-        elif self.category == "decorations":
+        elif self.category == "decorative":
             emoji_value = emoji_value or "🖼️"
             image_url = extra_value
             description = "Immagine decorativa per il profilo."
             if not image_url.startswith(("http://", "https://")):
                 await interaction.response.send_message("❌ Devi inserire un URL immagine valido.", ephemeral=True)
                 return
-        elif self.category == "embed_themes":
+        elif self.category == "themes":
             emoji_value = emoji_value or "🎨"
             raw_color = extra_value.strip()
             try:
@@ -5276,7 +5276,7 @@ class ShopCategorySelect(discord.ui.Select):
 
             discord.SelectOption(
                 label="Temi Embed",
-                value="embed_themes",
+                value="themes",
                 emoji="🎨",
                 description="Gestisci i temi degli embed"
             ),
@@ -5304,7 +5304,7 @@ class ShopCategorySelect(discord.ui.Select):
 
             discord.SelectOption(
                 label="Immagini Decorative",
-                value="decorations",
+                value="decorative",
                 emoji="🖼️",
                 description="Gestisci le immagini decorative"
             ),
@@ -5340,7 +5340,7 @@ class ShopCategorySelect(discord.ui.Select):
 
 class ShopAdminView(discord.ui.View):
 
-    def __init__(self, category="embed_themes"):
+    def __init__(self, category="themes"):
         super().__init__(timeout=300)
         self.category = category
 
@@ -5538,9 +5538,9 @@ def toggle_shop_item(item_id):
 
 
 def create_shop_item(item_id, name, emoji, price, rarity,
-                     category="embed_themes", description=""):
+                     category="themes", description=""):
     item_id = str(item_id).lower().strip()
-    category = str(category).strip()
+    category = {"embed_themes": "themes", "decorations": "decorative"}.get(str(category).strip(), str(category).strip())
     if item_id in SHOP_ITEMS:
         return False
 
@@ -5550,20 +5550,20 @@ def create_shop_item(item_id, name, emoji, price, rarity,
         return False
 
     slot_by_category = {
-        "embed_themes": "theme",
+        "themes": "theme",
         "titles": "title",
         "flairs": "flair",
         "collectibles": "collectible",
-        "decorations": "decoration",
+        "decorative": "decorative",
         "crates": "crate",
     }
 
     desc_by_category = {
-        "embed_themes": "Tema colore per gli embed personali.",
+        "themes": "Tema colore per gli embed personali.",
         "titles": "Titolo cosmetico mostrato nel profilo.",
         "flairs": "Frase profilo mostrata sotto il Titolo.",
         "collectibles": "Collezionabile da esporre nel profilo.",
-        "decorations": "Immagine decorativa per il profilo.",
+        "decorative": "Immagine decorativa per il profilo.",
         "crates": "Cassa Marketplace.",
     }
 
@@ -5572,7 +5572,7 @@ def create_shop_item(item_id, name, emoji, price, rarity,
         "emoji": str(emoji).strip() if category != "flairs" else "💬",
         "price": price,
         "rarity": str(rarity).strip(),
-        "category": category,
+        "category": {"embed_themes": "themes", "decorations": "decorative"}.get(category, category),
         "slot": slot_by_category.get(category, "misc"),
         "desc": str(description).strip() or desc_by_category.get(category, "Oggetto Marketplace."),
         "description": str(description).strip() or desc_by_category.get(category, "Oggetto Marketplace."),
@@ -5688,7 +5688,7 @@ def load_shop_items():
         SHOP_ITEMS[item_id] = {
             "name": name,
             "emoji": emoji,
-            "category": category,
+            "category": {"embed_themes": "themes", "decorations": "decorative"}.get(category, category),
             "price": int(price or 0),
             "rarity": rarity,
             "description": description or desc or "",
@@ -5697,11 +5697,11 @@ def load_shop_items():
             "new": bool(is_new),
             "limited": bool(limited),
             "slot": slot or {
-                "embed_themes": "theme",
+                "themes": "theme",
                 "titles": "title",
                 "flairs": "flair",
                 "collectibles": "collectible",
-                "decorations": "decoration",
+                "decorative": "decorative",
                 "crates": "crate",
             }.get(category, "misc"),
         }
