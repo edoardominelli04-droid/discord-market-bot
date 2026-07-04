@@ -2528,25 +2528,6 @@ async def portfolio(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="profilo")
-async def profilo(ctx, member: discord.Member = None):
-    if "profile" in globals():
-        if member is None:
-            await profile(ctx)
-        else:
-            await profile(ctx, member)
-    else:
-        await ctx.send("❌ Comando profilo non disponibile.")
-
-
-
-@bot.command(name="portafoglio")
-async def portafoglio(ctx):
-    if "portfolio" in globals():
-        await portfolio(ctx)
-    else:
-        await ctx.send("❌ Comando portafoglio non disponibile.")
-
 
 # =========================
 # FOLLOW SYSTEM
