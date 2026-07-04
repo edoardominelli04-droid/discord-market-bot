@@ -5124,7 +5124,7 @@ class ShopAdminView(discord.ui.View):
 # =========================
 
 def refresh_shop_admin_message(interaction, category):
-    \"\"\"Helper da richiamare dopo una modifica dello shop.\"\"\"
+    """Helper da richiamare dopo una modifica dello shop."""
     return build_category_embed(category)
 
 
