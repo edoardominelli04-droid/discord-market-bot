@@ -2945,7 +2945,7 @@ def _espn_clean_event_fallback(text):
         return "Evento"
     # Evita fallback troppo generici quando ESPN non espone il nome.
     low = text.lower()
-    if low in {"goal", "gol", "yellow card", "red card", "substitution"}:
+    if low in {"goal", "gol", "yellow card", "red card"}:
         return text.title()
     return text[:90]
 
@@ -2954,15 +2954,6 @@ def _espn_format_event_line(minute, label):
     label = _espn_clean_event_fallback(label)
     return f"{minute} {label}".strip()[:140]
 
-
-def _espn_substitution_line(detail, minute, fallback):
-    people = _espn_detail_people(detail)
-    if len(people) >= 2:
-        # Di solito ESPN mette entrante e uscente tra gli atleti/partecipanti.
-        return _espn_format_event_line(minute, f"Entra {people[0]} • Esce {people[1]}")
-    if len(people) == 1:
-        return _espn_format_event_line(minute, people[0])
-    return _espn_format_event_line(minute, fallback or "Sostituzione")
 
 
 def _espn_penalty_result(text):
@@ -2985,12 +2976,10 @@ def espn_event_details_summary(event):
 
     cards_y = {"home": 0, "away": 0}
     cards_r = {"home": 0, "away": 0}
-    subs_count = {"home": 0, "away": 0}
 
     scorers = []
     yellows = []
     reds = []
-    substitutions = []
     penalties = []
 
     if not isinstance(details, list):
@@ -3012,13 +3001,6 @@ def espn_event_details_summary(event):
         # campi strutturati ma poco testo descrittivo.
         is_yellow = bool(detail.get("yellowCard")) or "yellow" in text or "ammon" in text or type_id in {"74"}
         is_red = bool(detail.get("redCard")) or "red" in text or "espuls" in text or type_id in {"75"}
-        is_sub = (
-            bool(detail.get("substitution"))
-            or "substitution" in text
-            or "sostit" in text
-            or "sub " in text
-            or type_id in {"76"}
-        )
         is_penalty = bool(detail.get("penaltyKick")) or "penalty" in text or "rigor" in text
         is_goal = (
             bool(detail.get("scoringPlay"))
@@ -3030,8 +3012,6 @@ def espn_event_details_summary(event):
             cards_y[side] += 1
         if side and is_red:
             cards_r[side] += 1
-        if side and is_sub:
-            subs_count[side] += 1
 
         if is_goal:
             name = people[0] if people else ""
@@ -3048,8 +3028,6 @@ def espn_event_details_summary(event):
             label = (people[0] if people else raw_text or "Espulsione")
             reds.append(_espn_format_event_line(minute, label))
 
-        if is_sub:
-            substitutions.append(_espn_substitution_line(detail, minute, raw_text))
 
         # Se ESPN invia una sequenza rigori, la mostriamo in sezione dedicata.
         if is_penalty and not is_yellow and not is_red:
@@ -3063,11 +3041,9 @@ def espn_event_details_summary(event):
     return {
         "yellow": cards_y,
         "red": cards_r,
-        "subs": subs_count,
         "scorers": scorers[:8],
         "yellows": yellows[:8],
         "reds": reds[:8],
-        "substitutions": substitutions[:8],
         "penalties": penalties[:10],
     }
 
@@ -3192,11 +3168,9 @@ async def live(ctx):
             details = m.get("details") or {}
             yellow = details.get("yellow") or {}
             red = details.get("red") or {}
-            subs = details.get("subs") or {}
             scorers = details.get("scorers") or []
             yellows = details.get("yellows") or []
             reds = details.get("reds") or []
-            substitutions = details.get("substitutions") or []
             penalties = details.get("penalties") or []
 
             lines = [
@@ -3216,10 +3190,6 @@ async def live(ctx):
                 lines.append("🟥 Espulsi\n" + "\n".join(reds[:5]))
             elif (red.get("home") or red.get("away")):
                 lines.append(f"🟥 Espulsioni: {red.get('home', 0)}-{red.get('away', 0)}")
-            if substitutions:
-                lines.append("🔄 Sostituzioni\n" + "\n".join(substitutions[:5]))
-            elif (subs.get("home") or subs.get("away")):
-                lines.append(f"🔄 Cambi: {subs.get('home', 0)}-{subs.get('away', 0)}")
             if penalties:
                 lines.append("🎯 Rigori\n" + "\n".join(penalties[:6]))
 
@@ -3264,57 +3234,6 @@ async def testespn(ctx):
 
     embed.set_footer(text="ESPN è un endpoint pubblico non ufficiale: usare sempre con fallback.")
     await ctx.send(embed=embed)
-
-
-@bot.command()
-@admin_only()
-async def debugespnsubs(ctx):
-    matches, diagnostics = fetch_espn_live_matches()
-
-    if not matches:
-        await ctx.send("❌ Nessuna partita live ESPN trovata.")
-        return
-
-    league_code = matches[0]["league_code"]
-    event_id = str(matches[0]["event_id"])
-
-    status, data = fetch_espn_scoreboard(league_code)
-    events = data.get("events") or []
-
-    target = None
-    for event in events:
-        if str(event.get("id")) == event_id:
-            target = event
-            break
-
-    if not target:
-        await ctx.send("❌ Evento ESPN non trovato.")
-        return
-
-    import json
-
-    comps = target.get("competitions") or []
-    comp = comps[0] if comps else {}
-
-    # Cerca ovunque nel JSON della partita, non solo in details
-    raw_target = json.dumps(target, ensure_ascii=False, indent=2)
-    keywords = ["sub", "substitution", "substitute", "replace", "playerin", "playerout", "entr", "bench"]
-
-    found = []
-    for line in raw_target.splitlines():
-        low = line.lower()
-        if any(k in low for k in keywords):
-            found.append(line)
-
-    if not found:
-        await ctx.send("⚠️ Nessun riferimento a sostituzioni trovato nel JSON ESPN.")
-        return
-
-    output = "\n".join(found[:80])
-    if len(output) > 1800:
-        output = output[:1800] + "\n..."
-
-    await ctx.send(f"```json\n{output}\n```")
 
 
 async def live_football_data_fallback(ctx):
