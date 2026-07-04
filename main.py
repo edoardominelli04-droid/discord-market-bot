@@ -5255,11 +5255,6 @@ def load_shop_items():
             "limited": bool(r[9]),
         }
 
-async def refresh_view(interaction, category):
-    await interaction.edit_original_response(
-        embed=build_category_embed(category),
-        view=ShopAdminView()
-
 
 # =========================
 # SEASON SYSTEM
